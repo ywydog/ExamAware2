@@ -14,7 +14,8 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # 仅在原始仓库的 main 分支运行，fork 仓库跳过
+    if: github.repository == 'ExamAware/ExamAware2' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
       id-token: write
