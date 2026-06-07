@@ -1,0 +1,105 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'release/**'
+      - 'hotfix/**'
+      - 'trae/solo-agent-Dk1KvY'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows
+    runs-on: windows-latest
+
+    env:
+      PNPM_YES: 'true'
+      HUSKY: '0'
+      HUSKY_SKIP_INSTALL: '1'
+      HUSKY_SKIP_HOOKS: '1'
+      ELECTRON_BUILDER_CACHE: C:/Users/runneradmin/AppData/Local/Temp/eb-cache-${{ github.run_id }}
+      ELECTRON_BUILDER_TMPDIR: C:/Users/runneradmin/AppData/Local/Temp/eb-tmp-${{ github.run_id }}
+      ELECTRON_BUILDER_TMP_DIR: C:/Users/runneradmin/AppData/Local/Temp/eb-tmp-${{ github.run_id }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.2
+          standalone: true
+
+      - name: Force git to use HTTPS for GitHub
+        run: 'git config --global url."https://github.com/".insteadOf git@github.com:'
+
+      - name: Make pnpm non-interactive
+        run: pnpm config set yes true
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: |
+          echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Ensure electron-builder cache dirs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$Env:ELECTRON_BUILDER_CACHE" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$Env:ELECTRON_BUILDER_TMPDIR" | Out-Null
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build rpc package
+        run: pnpm rpc:build
+
+      - name: Build core package
+        run: pnpm core:build
+
+      - name: Build player package
+        run: pnpm player:build
+
+      - name: Build plugin SDK
+        run: pnpm --filter @dsz-examaware/plugin-sdk build
+
+      - name: Build desktop application
+        run: pnpm desktop:build:win
+
+      - name: Generate tag
+        id: tag
+        shell: bash
+        run: |
+          echo "tag=v$(date +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          files: packages/desktop/out/*
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
