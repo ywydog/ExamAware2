@@ -21,6 +21,7 @@ import {
   getCurrentTimeMs
 } from './ntpService/timeService'
 import { httpApiService } from './http/httpApiService'
+import { examEventService } from './exam/examEventService'
 import { castService } from './cast/castService'
 import { createMainContext } from './runtime/context'
 import { ensureAppTray, shouldSuppressActivate, isTrayPopoverVisible } from './tray'
@@ -409,6 +410,9 @@ app.whenReady().then(async () => {
     } catch {}
     try {
       void httpApiService.dispose()
+    } catch {}
+    try {
+      void examEventService.dispose()
     } catch {}
     try {
       void castService.dispose()

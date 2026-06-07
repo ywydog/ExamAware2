@@ -568,14 +568,46 @@ export class HttpApiService {
         })
       )
 
+      // 订阅考试事件
+      let examEventHandler: ((msg: any) => void) | null = null
+      let examStatusHandler: ((status: any) => void) | null = null
+
       ws.on('message', (data) => {
         try {
           const parsed = JSON.parse(data.toString())
           if (parsed?.type === 'ping') {
             ws.send(JSON.stringify({ type: 'pong', ts: getCurrentTimeMs() }))
+          } else if (parsed?.type === 'subscribe' && parsed?.channel === 'exam-events') {
+            // Subscribe to exam events
+            const { examEventService } = require('../../exam/examEventService')
+            examEventHandler = (msg: any) => {
+              if (ws.readyState === 1) {
+                // OPEN
+                ws.send(JSON.stringify(msg))
+              }
+            }
+            examStatusHandler = (status: any) => {
+              if (ws.readyState === 1) {
+                ws.send(JSON.stringify({ type: 'exam-status', data: status, ts: getCurrentTimeMs() }))
+              }
+            }
+            examEventService.on('exam-event', examEventHandler)
+            examEventService.on('exam-status', examStatusHandler)
+            ws.send(JSON.stringify({ type: 'subscribed', channel: 'exam-events', ts: getCurrentTimeMs() }))
           }
         } catch {
           // ignore malformed
+        }
+      })
+
+      ws.on('close', () => {
+        if (examEventHandler) {
+          const { examEventService } = require('../../exam/examEventService')
+          examEventService.off('exam-event', examEventHandler)
+        }
+        if (examStatusHandler) {
+          const { examEventService } = require('../../exam/examEventService')
+          examEventService.off('exam-status', examStatusHandler)
         }
       })
     })

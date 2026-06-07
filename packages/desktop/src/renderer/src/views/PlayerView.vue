@@ -173,6 +173,7 @@ const handleExamInfoLargeFontToggle = (enabled: boolean) => {
 // 考试开始事件
 const handleExamStart = (exam: any) => {
   console.log('考试开始:', exam)
+  ipcRenderer?.send?.('exam:start', exam)
   NotifyPlugin.success({
     title: '考试开始',
     content: `${exam.name} 已开始`,
@@ -184,6 +185,7 @@ const handleExamStart = (exam: any) => {
 // 考试结束事件
 const handleExamEnd = (exam: any) => {
   console.log('考试结束:', exam)
+  ipcRenderer?.send?.('exam:end', exam)
   NotifyPlugin.info({
     title: '考试结束',
     content: `${exam.name} 已结束`,
@@ -195,6 +197,7 @@ const handleExamEnd = (exam: any) => {
 // 考试提醒事件
 const handleExamAlert = (exam: any, alertTime: number) => {
   console.log('考试提醒:', exam, alertTime)
+  ipcRenderer?.send?.('exam:alert', exam, alertTime)
   const minutes = Math.floor(alertTime / 60000)
   NotifyPlugin.warning({
     title: '考试提醒',
@@ -232,6 +235,7 @@ const handleError = (error: string) => {
 // 退出播放（通过 IPC 请求主进程关闭窗口）
 const handleExit = () => {
   try {
+    ipcRenderer?.send?.('exam:presentation-stop')
     ipcRenderer?.send?.('player-window-exit')
   } catch (e) {
     console.warn('发送退出请求失败:', e)
@@ -296,6 +300,9 @@ onMounted(async () => {
         placement: 'bottom-right',
         closeBtn: true
       })
+
+      // 通知主进程开始放映
+      ipcRenderer?.send?.('exam:presentation-start', configData.value)
     } else {
       console.warn('配置加载器返回了空配置')
       NotifyPlugin.warning({
@@ -320,6 +327,11 @@ onMounted(async () => {
 
 onUnmounted(() => {
   console.log('PlayerViewNew 卸载')
+
+  // 通知主进程停止放映
+  try {
+    ipcRenderer?.send?.('exam:presentation-stop')
+  } catch {}
 
   // 清理资源
   timeProvider.destroy()

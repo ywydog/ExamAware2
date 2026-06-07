@@ -38,6 +38,7 @@ import { getSharedConfig, setSharedConfig } from '../state/sharedConfigStore'
 import axios from 'axios'
 import https from 'https'
 import { parseExamConfig, validateExamConfig } from '@dsz-examaware/core'
+import { examEventService } from '../exam/examEventService'
 
 // minimal disposer group for main process
 function createDisposerGroup() {
@@ -842,6 +843,33 @@ export function registerIpcHandlers(ctx?: MainContext): () => void {
   if (ctx)
     ctx.ipc.handle('open-file-dialog', (_e, options?: OpenDialogOptions) => openFile(options))
   else group.add(handle('open-file-dialog', (_e, options?: OpenDialogOptions) => openFile(options)))
+
+  // ===== 考试事件 IPC（供播放器窗口通知主进程） =====
+  group.add(
+    on('exam:presentation-start', (_event, config: any) => {
+      examEventService.onPresentationStart(config)
+    })
+  )
+  group.add(
+    on('exam:presentation-stop', () => {
+      examEventService.onPresentationStop()
+    })
+  )
+  group.add(
+    on('exam:start', (_event, examInfo: any) => {
+      examEventService.onExamStart(examInfo)
+    })
+  )
+  group.add(
+    on('exam:alert', (_event, examInfo: any, alertTime: number) => {
+      examEventService.onExamAlert(examInfo, alertTime)
+    })
+  )
+  group.add(
+    on('exam:end', (_event, examInfo: any) => {
+      examEventService.onExamEnd(examInfo)
+    })
+  )
 
   return () => group.disposeAll()
 }
