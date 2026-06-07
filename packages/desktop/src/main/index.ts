@@ -23,6 +23,7 @@ import {
 import { httpApiService } from './http/httpApiService'
 import { examEventService } from './exam/examEventService'
 import { castService } from './cast/castService'
+import { ipcServer } from './ipc/ipcServer'
 import { createMainContext } from './runtime/context'
 import { ensureAppTray, shouldSuppressActivate, isTrayPopoverVisible } from './tray'
 import { PluginHost, createFilePreferenceStore } from './plugin'
@@ -203,6 +204,94 @@ app.whenReady().then(async () => {
     await castService.start()
   } catch (error) {
     appLogger.error('Failed to start Cast service', error as Error)
+  }
+
+  // 注册 IPC 命令处理器
+  ipcServer.registerHandler('play-from-url', async (payload) => {
+    const { url } = payload
+    if (!url || typeof url !== 'string') {
+      throw new Error('缺少 url 参数')
+    }
+    // 复用 ipcHandlers 中的逻辑：拉取 URL 内容 → 创建临时文件 → 打开播放器
+    const axios = (await import('axios')).default
+    const https = (await import('https')).default
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error('URL 格式不正确')
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('仅支持 http/https URL')
+    }
+    const readBody = (payload: unknown) => {
+      const data = String(payload ?? '')
+      if (!data.trim()) throw new Error('URL 返回内容为空')
+      return data
+    }
+    let data: string
+    try {
+      const res = await axios.get<string>(url, { responseType: 'text', timeout: 30000 })
+      data = readBody(res.data)
+    } catch (error: any) {
+      const code = error?.cause?.code || error?.code
+      if (code !== 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY') throw error
+      appLogger.warn('[ipc] fetch url tls failed, retrying insecure', { url, code })
+      const httpsAgent = new https.Agent({ rejectUnauthorized: false })
+      const res = await axios.get<string>(url, { responseType: 'text', timeout: 30000, httpsAgent })
+      data = readBody(res.data)
+    }
+    // 创建临时配置文件并打开播放器
+    const tempDir = path.join(app.getPath('temp'), 'examaware-player')
+    await fs.promises.mkdir(tempDir, { recursive: true })
+    const tempFile = path.join(tempDir, `ipc-${Date.now()}-${Math.random().toString(16).slice(2)}.ea2`)
+    await fs.promises.writeFile(tempFile, data, 'utf-8')
+    createPlayerWindow(tempFile)
+    return { filePath: tempFile }
+  })
+
+  ipcServer.registerHandler('play-from-file', async (payload) => {
+    const { path: filePath } = payload
+    if (!filePath || typeof filePath !== 'string') {
+      throw new Error('缺少 path 参数')
+    }
+    if (!fs.existsSync(filePath)) {
+      throw new Error('文件不存在')
+    }
+    const data = await fs.promises.readFile(filePath, 'utf-8')
+    if (!data.trim()) {
+      throw new Error('文件内容为空')
+    }
+    // 创建临时配置文件并打开播放器
+    const tempDir = path.join(app.getPath('temp'), 'examaware-player')
+    await fs.promises.mkdir(tempDir, { recursive: true })
+    const tempFile = path.join(tempDir, `ipc-${Date.now()}-${Math.random().toString(16).slice(2)}.ea2`)
+    await fs.promises.writeFile(tempFile, data, 'utf-8')
+    createPlayerWindow(tempFile)
+    return { filePath: tempFile }
+  })
+
+  ipcServer.registerHandler('stop', async () => {
+    windowManager.close('player')
+    return { stopped: true }
+  })
+
+  ipcServer.registerHandler('status', async () => {
+    return examEventService.getExamStatus()
+  })
+
+  // 启动 IPC 服务器（如果配置启用）
+  try {
+    const { getConfig } = await import('./configStore')
+    const ipcEnabled = getConfig('ipc.enabled', false)
+    if (ipcEnabled) {
+      const started = await ipcServer.start()
+      if (started) {
+        appLogger.info('[app] IPC 服务器已启动')
+      }
+    }
+  } catch (err: any) {
+    appLogger.warn(`[app] IPC 服务器启动失败: ${err.message}`)
   }
 
   // 初始化时间同步服务
@@ -413,6 +502,9 @@ app.whenReady().then(async () => {
     } catch {}
     try {
       void examEventService.dispose()
+    } catch {}
+    try {
+      void ipcServer.stop()
     } catch {}
     try {
       void castService.dispose()
