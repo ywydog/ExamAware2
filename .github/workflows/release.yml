@@ -14,20 +14,32 @@ concurrency:
 
 jobs:
   build:
-    name: Build Windows
-    runs-on: windows-latest
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
 
     env:
       PNPM_YES: 'true'
       HUSKY: '0'
       HUSKY_SKIP_INSTALL: '1'
       HUSKY_SKIP_HOOKS: '1'
-      ELECTRON_BUILDER_CACHE: C:/Users/runneradmin/AppData/Local/Temp/eb-cache-${{ github.run_id }}
-      ELECTRON_BUILDER_TMPDIR: C:/Users/runneradmin/AppData/Local/Temp/eb-tmp-${{ github.run_id }}
-      ELECTRON_BUILDER_TMP_DIR: C:/Users/runneradmin/AppData/Local/Temp/eb-tmp-${{ github.run_id }}
+      ELECTRON_BUILDER_CACHE: ${{ matrix.eb_cache }}
+      ELECTRON_BUILDER_TMPDIR: ${{ matrix.eb_tmp }}
+      ELECTRON_BUILDER_TMP_DIR: ${{ matrix.eb_tmp }}
 
     permissions:
       contents: write
+
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            build_script: desktop:build:win
+            eb_cache: C:/Users/runneradmin/AppData/Local/Temp/eb-cache-${{ github.run_id }}
+            eb_tmp: C:/Users/runneradmin/AppData/Local/Temp/eb-tmp-${{ github.run_id }}
+          - os: ubuntu-latest
+            build_script: desktop:build:linux
+            eb_cache: ${{ github.workspace }}/.tmp/electron-builder-cache-${{ github.run_id }}-ubuntu-latest
+            eb_tmp: ${{ github.workspace }}/.tmp/electron-builder-tmp-${{ github.run_id }}-ubuntu-latest
 
     steps:
       - name: Checkout code
@@ -64,11 +76,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
 
-      - name: Ensure electron-builder cache dirs
+      - name: Ensure electron-builder cache dirs (Windows)
+        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$Env:ELECTRON_BUILDER_CACHE" | Out-Null
           New-Item -ItemType Directory -Force -Path "$Env:ELECTRON_BUILDER_TMPDIR" | Out-Null
+
+      - name: Ensure electron-builder cache dirs (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          CACHE="${ELECTRON_BUILDER_CACHE}"
+          TMP="${ELECTRON_BUILDER_TMPDIR}"
+          mkdir -p "$CACHE" "$TMP"
+          chmod -R 777 "$CACHE" "$TMP"
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -86,7 +114,14 @@ jobs:
         run: pnpm --filter @dsz-examaware/plugin-sdk build
 
       - name: Build desktop application
-        run: pnpm desktop:build:win
+        run: pnpm ${{ matrix.build_script }}
+
+      - name: Upload artifacts to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-build
+          path: packages/desktop/out/*
+          if-no-files-found: error
 
       - name: Generate tag
         id: tag
