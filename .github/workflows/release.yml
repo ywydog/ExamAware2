@@ -38,8 +38,8 @@ jobs:
             eb_tmp: C:/Users/runneradmin/AppData/Local/Temp/eb-tmp-${{ github.run_id }}
           - os: ubuntu-latest
             build_script: desktop:build:linux
-            eb_cache: ${{ github.workspace }}/.tmp/electron-builder-cache-${{ github.run_id }}-ubuntu-latest
-            eb_tmp: ${{ github.workspace }}/.tmp/electron-builder-tmp-${{ github.run_id }}-ubuntu-latest
+            eb_cache: /tmp/electron-builder-cache-${{ github.run_id }}
+            eb_tmp: /tmp/electron-builder-tmp-${{ github.run_id }}
 
     steps:
       - name: Checkout code
