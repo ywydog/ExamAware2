@@ -282,7 +282,7 @@ app.whenReady().then(async () => {
 
   // 启动 IPC 服务器（如果配置启用）
   try {
-    const { getConfig } = await import('./configStore')
+    const { getConfig, onConfigChanged } = await import('./configStore')
     const ipcEnabled = getConfig('ipc.enabled', false)
     if (ipcEnabled) {
       const started = await ipcServer.start()
@@ -290,6 +290,20 @@ app.whenReady().then(async () => {
         appLogger.info('[app] IPC 服务器已启动')
       }
     }
+
+    // 监听配置变更，动态启停 IPC 服务器
+    onConfigChanged((cfg) => {
+      const enabled = cfg?.ipc?.enabled === true
+      if (enabled && !ipcServer.IsRunning) {
+        ipcServer.start().then((ok) => {
+          if (ok) appLogger.info('[app] IPC 服务器已启动（配置变更）')
+        })
+      } else if (!enabled && ipcServer.IsRunning) {
+        ipcServer.stop().then(() => {
+          appLogger.info('[app] IPC 服务器已停止（配置变更）')
+        })
+      }
+    })
   } catch (err: any) {
     appLogger.warn(`[app] IPC 服务器启动失败: ${err.message}`)
   }

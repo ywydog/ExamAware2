@@ -102,6 +102,13 @@ export const settingsModule: AppModule = {
         component: () => import('@renderer/views/settings/HttpApiSettings.vue')
       },
       {
+        id: 'ipc',
+        label: '外部 IPC',
+        icon: 'swap',
+        order: 6,
+        component: () => import('@renderer/views/settings/IpcSettings.vue')
+      },
+      {
         id: 'cast',
         label: '共享与投送',
         icon: 'share',
@@ -112,21 +119,21 @@ export const settingsModule: AppModule = {
         id: 'logging',
         label: '日志',
         icon: 'file-search',
-        order: 6,
+        order: 7,
         component: () => import('@renderer/views/settings/LoggingSettings.vue')
       },
       {
         id: 'plugin-source',
         label: '插件源',
         icon: 'link',
-        order: 7,
+        order: 8,
         component: () => import('@renderer/views/settings/PluginSourceSettings.vue')
       },
       {
         id: 'plugins',
         label: '插件',
         icon: 'extension',
-        order: 8,
+        order: 9,
         component: () => import('@renderer/views/settings/PluginSettings.vue')
       },
       {
