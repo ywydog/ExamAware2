@@ -280,32 +280,32 @@ app.whenReady().then(async () => {
     return examEventService.getExamStatus()
   })
 
-  // 启动 IPC 服务器（如果配置启用）
+  // 启动外部 IPC 服务器（如果配置启用）
   try {
     const { getConfig, onConfigChanged } = await import('./configStore')
-    const ipcEnabled = getConfig('ipc.enabled', false)
-    if (ipcEnabled) {
+    const externalIpcEnabled = getConfig('externalIpc.enabled', false)
+    if (externalIpcEnabled) {
       const started = await ipcServer.start()
       if (started) {
-        appLogger.info('[app] IPC 服务器已启动')
+        appLogger.info('[app] 外部 IPC 服务器已启动')
       }
     }
 
-    // 监听配置变更，动态启停 IPC 服务器
+    // 监听配置变更，动态启停外部 IPC 服务器
     onConfigChanged((cfg) => {
-      const enabled = cfg?.ipc?.enabled === true
+      const enabled = cfg?.externalIpc?.enabled === true
       if (enabled && !ipcServer.IsRunning) {
         ipcServer.start().then((ok) => {
-          if (ok) appLogger.info('[app] IPC 服务器已启动（配置变更）')
+          if (ok) appLogger.info('[app] 外部 IPC 服务器已启动（配置变更）')
         })
       } else if (!enabled && ipcServer.IsRunning) {
         ipcServer.stop().then(() => {
-          appLogger.info('[app] IPC 服务器已停止（配置变更）')
+          appLogger.info('[app] 外部 IPC 服务器已停止（配置变更）')
         })
       }
     })
   } catch (err: any) {
-    appLogger.warn(`[app] IPC 服务器启动失败: ${err.message}`)
+    appLogger.warn(`[app] 外部 IPC 服务器启动失败: ${err.message}`)
   }
 
   // 初始化时间同步服务

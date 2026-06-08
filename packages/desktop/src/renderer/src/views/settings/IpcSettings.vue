@@ -2,7 +2,24 @@
   <div class="settings-page">
     <h2>外部 IPC</h2>
     <t-space direction="vertical" size="small" style="width: 100%">
-      <t-card :title="'IPC 服务'" theme="poster2">
+      <t-card :title="'内部 IPC'" theme="poster2">
+        <div class="settings-item">
+          <div class="settings-item-icon">
+            <TIcon name="laptop" size="22px" />
+          </div>
+          <div class="settings-item-main">
+            <div class="settings-item-title">内部通信</div>
+            <div class="settings-item-desc">
+              ExamAware2 窗口间通信（播放器 → 主进程 → WebSocket 事件推送），始终启用，无需配置。
+            </div>
+          </div>
+          <div class="settings-item-action">
+            <t-tag theme="success" variant="light-outline">始终启用</t-tag>
+          </div>
+        </div>
+      </t-card>
+
+      <t-card :title="'外部 IPC'" theme="poster2">
         <div class="settings-item">
           <div class="settings-item-icon">
             <TIcon name="swap" size="22px" />
@@ -10,12 +27,12 @@
           <div class="settings-item-main">
             <div class="settings-item-title">启用外部 IPC</div>
             <div class="settings-item-desc">
-              允许外部程序（如 ClassIsland 插件）通过 Named Pipe / Unix Socket 控制 ExamAware2。
+              允许外部程序（如 ClassIsland 插件）通过 Named Pipe / Unix Socket 控制 ExamAware2 的放映功能。
             </div>
           </div>
           <div class="settings-item-action">
             <t-switch
-              v-model="ipcEnabled"
+              v-model="externalIpcEnabled"
               :label="[
                 { value: true, label: '开' },
                 { value: false, label: '关' }
@@ -34,14 +51,14 @@
             <div class="settings-item-title">IPC 地址</div>
             <div class="settings-item-desc">外部程序连接此管道/套接字进行通信。</div>
             <div style="margin-top: 4px; display: flex; align-items: center; gap: 8px">
-              <t-tag v-if="ipcEnabled" theme="success" variant="light-outline">
+              <t-tag v-if="externalIpcEnabled" theme="success" variant="light-outline">
                 {{ ipcAddress }}
               </t-tag>
               <t-tag v-else theme="default" variant="light-outline">服务已关闭</t-tag>
               <t-button
                 variant="outline"
                 size="small"
-                :disabled="!ipcEnabled"
+                :disabled="!externalIpcEnabled"
                 @click="copyIpcAddress"
               >
                 复制地址
@@ -73,7 +90,7 @@
         </div>
 
         <t-alert
-          v-if="ipcEnabled"
+          v-if="externalIpcEnabled"
           theme="info"
           message="启用外部 IPC 后，同一台计算机上的其他程序可以控制 ExamAware2 的放映功能。请确保在可信环境中使用。"
           style="margin-top: 12px"
@@ -84,7 +101,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, ref, watch, type Ref } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { Icon as TIcon } from 'tdesign-icons-vue-next'
 
@@ -93,7 +110,7 @@ const settingsApi = inject('settingsApi') as {
   set: (key: string, value: any) => void
 }
 
-const ipcEnabled = ref(settingsApi.get('ipc.enabled', false))
+const externalIpcEnabled = ref(settingsApi.get('externalIpc.enabled', false))
 
 const ipcAddress = computed(() => {
   if (typeof navigator === 'undefined') return ''
@@ -104,8 +121,8 @@ const ipcAddress = computed(() => {
 
 const commands = ['ping', 'play-from-url', 'play-from-file', 'stop', 'status']
 
-watch(ipcEnabled, (val) => {
-  settingsApi.set('ipc.enabled', val)
+watch(externalIpcEnabled, (val) => {
+  settingsApi.set('externalIpc.enabled', val)
 })
 
 async function copyIpcAddress() {
