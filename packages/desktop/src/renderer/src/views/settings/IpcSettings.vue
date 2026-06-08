@@ -71,6 +71,42 @@
 
         <div class="settings-item">
           <div class="settings-item-icon">
+            <TIcon name="link" size="22px" />
+          </div>
+          <div class="settings-item-main">
+            <div class="settings-item-title">连接状态</div>
+            <div class="settings-item-desc">检查是否有外部程序（如 ClassIsland）已连接。</div>
+            <div style="margin-top: 4px; display: flex; align-items: center; gap: 8px">
+              <t-tag v-if="connectionStatus" :theme="connectionStatus.clientCount > 0 ? 'success' : 'warning'" variant="light-outline">
+                {{ connectionStatus.clientCount > 0 ? `${connectionStatus.clientCount} 个客户端已连接` : '暂无客户端连接' }}
+              </t-tag>
+              <t-button
+                variant="outline"
+                size="small"
+                :disabled="!externalIpcEnabled"
+                :loading="checkingConnection"
+                @click="checkConnection"
+              >
+                检查连接
+              </t-button>
+            </div>
+            <div v-if="connectionStatus && connectionStatus.clientCount > 0" style="margin-top: 8px">
+              <div v-for="client in connectionStatus.clients" :key="client.id" style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px">
+                <t-tag variant="light-outline" size="small">
+                  #{{ client.id }}
+                </t-tag>
+                <t-tag variant="light-outline" size="small">
+                  {{ formatTime(client.connectedAt) }}
+                </t-tag>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <t-divider />
+
+        <div class="settings-item">
+          <div class="settings-item-icon">
             <TIcon name="control-platform" size="22px" />
           </div>
           <div class="settings-item-main">
@@ -110,7 +146,11 @@ const settingsApi = inject('settingsApi') as {
   set: (key: string, value: any) => void
 }
 
+const ipcRenderer = inject('ipcRenderer') as any
+
 const externalIpcEnabled = ref(settingsApi.get('externalIpc.enabled', false))
+const checkingConnection = ref(false)
+const connectionStatus = ref<{ isRunning: boolean; clientCount: number; clients: any[] } | null>(null)
 
 const ipcAddress = computed(() => {
   if (typeof navigator === 'undefined') return ''
@@ -123,7 +163,34 @@ const commands = ['ping', 'play-from-url', 'play-from-file', 'stop', 'status']
 
 watch(externalIpcEnabled, (val) => {
   settingsApi.set('externalIpc.enabled', val)
+  // 关闭时清除连接状态
+  if (!val) {
+    connectionStatus.value = null
+  }
 })
+
+async function checkConnection() {
+  checkingConnection.value = true
+  try {
+    const status = await ipcRenderer.invoke('external-ipc:get-status')
+    connectionStatus.value = status
+    if (status.clientCount > 0) {
+      MessagePlugin.success(`检测到 ${status.clientCount} 个外部客户端已连接`)
+    } else {
+      MessagePlugin.warning('暂无外部客户端连接。请确保 ClassIsland 已安装 ExamAware2Ci 插件并已启动。')
+    }
+  } catch (error) {
+    MessagePlugin.error('获取连接状态失败')
+    connectionStatus.value = null
+  } finally {
+    checkingConnection.value = false
+  }
+}
+
+function formatTime(timestamp: number): string {
+  const date = new Date(timestamp)
+  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
+}
 
 async function copyIpcAddress() {
   try {

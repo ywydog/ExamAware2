@@ -23,9 +23,18 @@ interface IpcResponse {
   error?: string
 }
 
+interface ConnectedClient {
+  id: number
+  remoteAddress: string
+  connectedAt: number
+  lastActivityAt: number
+}
+
 class IpcServer {
   private server: net.Server | null = null
   private isRunning = false
+  private nextClientId = 0
+  private clients: Map<net.Socket, ConnectedClient> = new Map()
 
   // 命令处理器映射
   private handlers: Map<string, (payload: Record<string, any>) => Promise<any>> = new Map()
@@ -73,6 +82,12 @@ class IpcServer {
   async stop(): Promise<void> {
     if (!this.server) return
 
+    // 关闭所有客户端连接
+    for (const [socket] of this.clients) {
+      try { socket.destroy() } catch { /* ignore */ }
+    }
+    this.clients.clear()
+
     return new Promise((resolve) => {
       this.server!.close(() => {
         this.isRunning = false
@@ -94,9 +109,21 @@ class IpcServer {
   }
 
   private handleConnection(socket: net.Socket) {
+    const clientId = this.nextClientId++
+    const now = Date.now()
+    const client: ConnectedClient = {
+      id: clientId,
+      remoteAddress: socket.remoteAddress || 'unknown',
+      connectedAt: now,
+      lastActivityAt: now
+    }
+    this.clients.set(socket, client)
+    appLogger.info(`[ipc] 客户端已连接 #${clientId} (${client.remoteAddress})，当前连接数: ${this.clients.size}`)
+
     let buffer = ''
 
     socket.on('data', (data) => {
+      client.lastActivityAt = Date.now()
       buffer += data.toString('utf-8')
 
       // 按换行符分割消息
@@ -123,8 +150,14 @@ class IpcServer {
       }
     })
 
+    socket.on('close', () => {
+      this.clients.delete(socket)
+      appLogger.info(`[ipc] 客户端已断开 #${clientId}，当前连接数: ${this.clients.size}`)
+    })
+
     socket.on('error', (err) => {
-      appLogger.debug(`[ipc] 客户端连接错误: ${err.message}`)
+      appLogger.debug(`[ipc] 客户端连接错误 #${clientId}: ${err.message}`)
+      this.clients.delete(socket)
     })
   }
 
@@ -161,6 +194,18 @@ class IpcServer {
 
   get IsRunning(): boolean {
     return this.isRunning
+  }
+
+  get ClientCount(): number {
+    return this.clients.size
+  }
+
+  getConnectionStatus(): { isRunning: boolean; clientCount: number; clients: ConnectedClient[] } {
+    return {
+      isRunning: this.isRunning,
+      clientCount: this.clients.size,
+      clients: Array.from(this.clients.values())
+    }
   }
 }
 

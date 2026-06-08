@@ -8,6 +8,7 @@ import {
   type WebContents,
   type OpenDialogOptions
 } from 'electron'
+import { ipcServer } from '../ipc/ipcServer'
 import * as fs from 'fs'
 import * as path from 'path'
 import { addLog } from '../logging/logStore'
@@ -214,6 +215,18 @@ export function registerIpcHandlers(ctx?: MainContext): () => void {
   // 应用信息
   if (ctx) ctx.ipc.handle('app:get-version', () => app.getVersion())
   else group.add(handle('app:get-version', () => app.getVersion()))
+
+  // 外部 IPC 连接状态
+  if (ctx)
+    ctx.ipc.handle('external-ipc:get-status', () => {
+      return ipcServer.getConnectionStatus()
+    })
+  else
+    group.add(
+      handle('external-ipc:get-status', () => {
+        return ipcServer.getConnectionStatus()
+      })
+    )
 
   // Handle set config data (called from playerWindow)
   if (ctx)
