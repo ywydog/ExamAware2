@@ -7,6 +7,7 @@ import { getCurrentTimeMs } from '../ntpService/timeService'
 
 export type ExamEventType =
   | 'exam-presentation-start'
+  | 'exam-presentation-stop'
   | 'exam-start'
   | 'exam-time-remaining'
   | 'exam-end'
@@ -73,8 +74,17 @@ class ExamEventService extends EventEmitter {
 
   onPresentationStop() {
     this.isPlaying = false
+    const config = this.currentConfig
     this.currentConfig = null
     this.stopStatusBroadcast()
+    if (config) {
+      this.broadcastEvent('exam-presentation-stop', {
+        examName: config.examInfos?.[0]?.name ?? '',
+        examConfigName: config.examName ?? '',
+        startTime: config.examInfos?.[0]?.start ?? '',
+        endTime: config.examInfos?.[0]?.end ?? ''
+      })
+    }
   }
 
   // Called when an exam starts
