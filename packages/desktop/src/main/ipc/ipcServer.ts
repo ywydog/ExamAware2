@@ -1,6 +1,8 @@
 import * as net from 'net'
 import * as fs from 'fs'
 import { appLogger } from '../logging/winstonLogger'
+import { examEventService } from '../exam/examEventService'
+import type { ExamEventMessage } from '../exam/examEventService'
 
 const IPC_NAME = 'ExamAware2.examaware2'
 
@@ -28,6 +30,7 @@ interface ConnectedClient {
   remoteAddress: string
   connectedAt: number
   lastActivityAt: number
+  subscribedEvents: boolean
 }
 
 class IpcServer {
@@ -38,6 +41,9 @@ class IpcServer {
 
   // 命令处理器映射
   private handlers: Map<string, (payload: Record<string, any>) => Promise<any>> = new Map()
+
+  // examEventService 事件监听器引用
+  private examEventHandler: ((msg: ExamEventMessage) => void) | null = null
 
   registerHandler(type: string, handler: (payload: Record<string, any>) => Promise<any>) {
     this.handlers.set(type, handler)
@@ -74,6 +80,8 @@ class IpcServer {
       this.server.listen(address, () => {
         this.isRunning = true
         appLogger.info(`[ipc] IPC 服务器已启动，监听: ${address}`)
+        // 注册考试事件监听，将事件推送给所有已订阅的 IPC 客户端
+        this.setupEventForwarding()
         resolve(true)
       })
     })
@@ -81,6 +89,9 @@ class IpcServer {
 
   async stop(): Promise<void> {
     if (!this.server) return
+
+    // 移除考试事件监听
+    this.teardownEventForwarding()
 
     // 关闭所有客户端连接
     for (const [socket] of this.clients) {
@@ -115,7 +126,8 @@ class IpcServer {
       id: clientId,
       remoteAddress: socket.remoteAddress || 'unknown',
       connectedAt: now,
-      lastActivityAt: now
+      lastActivityAt: now,
+      subscribedEvents: false
     }
     this.clients.set(socket, client)
     appLogger.info(`[ipc] 客户端已连接 #${clientId} (${client.remoteAddress})，当前连接数: ${this.clients.size}`)
@@ -134,7 +146,7 @@ class IpcServer {
         const trimmed = line.trim()
         if (!trimmed) continue
 
-        this.processMessage(trimmed)
+        this.processMessage(trimmed, socket)
           .then((response) => {
             const responseStr = JSON.stringify(response) + '\n'
             socket.write(responseStr, 'utf-8')
@@ -161,7 +173,7 @@ class IpcServer {
     })
   }
 
-  private async processMessage(messageStr: string): Promise<IpcResponse> {
+  private async processMessage(messageStr: string, socket?: net.Socket): Promise<IpcResponse> {
     let request: IpcRequest
     try {
       request = JSON.parse(messageStr)
@@ -177,6 +189,16 @@ class IpcServer {
       return { success: true, type: 'ping', result: 'pong' }
     }
 
+    // 订阅考试事件命令
+    if (type === 'subscribe-events' && socket) {
+      const client = this.clients.get(socket)
+      if (client) {
+        client.subscribedEvents = true
+        appLogger.info(`[ipc] 客户端 #${client.id} 已订阅考试事件`)
+      }
+      return { success: true, type: 'subscribe-events', result: 'subscribed' }
+    }
+
     // 查找处理器
     const handler = this.handlers.get(type)
     if (!handler) {
@@ -189,6 +211,55 @@ class IpcServer {
     } catch (err: any) {
       appLogger.error(`[ipc] 命令处理失败: ${type} - ${err.message}`)
       return { success: false, type, error: err.message || '命令处理失败' }
+    }
+  }
+
+  /**
+   * 注册 examEventService 事件监听，将考试事件转发给所有已订阅的 IPC 客户端
+   */
+  private setupEventForwarding() {
+    if (this.examEventHandler) return // 已注册
+
+    this.examEventHandler = (msg: ExamEventMessage) => {
+      this.broadcastToSubscribedClients(msg)
+    }
+    examEventService.on('exam-event', this.examEventHandler)
+    appLogger.info('[ipc] 已注册考试事件转发监听')
+  }
+
+  /**
+   * 移除 examEventService 事件监听
+   */
+  private teardownEventForwarding() {
+    if (this.examEventHandler) {
+      examEventService.off('exam-event', this.examEventHandler)
+      this.examEventHandler = null
+      appLogger.info('[ipc] 已移除考试事件转发监听')
+    }
+  }
+
+  /**
+   * 向所有已订阅考试事件的 IPC 客户端广播事件消息
+   */
+  private broadcastToSubscribedClients(msg: ExamEventMessage) {
+    const eventStr = JSON.stringify(msg) + '\n'
+    let sentCount = 0
+
+    for (const [socket, client] of this.clients) {
+      if (!client.subscribedEvents) continue
+
+      try {
+        if (!socket.destroyed && socket.writable) {
+          socket.write(eventStr, 'utf-8')
+          sentCount++
+        }
+      } catch (err: any) {
+        appLogger.debug(`[ipc] 向客户端 #${client.id} 推送事件失败: ${err.message}`)
+      }
+    }
+
+    if (sentCount > 0) {
+      appLogger.info(`[ipc] 考试事件已推送给 ${sentCount} 个客户端: ${msg.event}`)
     }
   }
 

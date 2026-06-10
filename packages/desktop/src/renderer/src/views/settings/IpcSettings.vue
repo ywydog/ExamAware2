@@ -10,7 +10,7 @@
           <div class="settings-item-main">
             <div class="settings-item-title">内部通信</div>
             <div class="settings-item-desc">
-              ExamAware2 窗口间通信（播放器 → 主进程 → WebSocket 事件推送），始终启用，无需配置。
+              ExamAware2 窗口间通信（播放器 → 主进程），始终启用，无需配置。
             </div>
           </div>
           <div class="settings-item-action">
@@ -27,7 +27,7 @@
           <div class="settings-item-main">
             <div class="settings-item-title">启用外部 IPC</div>
             <div class="settings-item-desc">
-              允许外部程序（如 ClassIsland 插件）通过 Named Pipe / Unix Socket 控制 ExamAware2 的放映功能。
+              允许外部程序（如 ClassIsland 插件）通过 Named Pipe / Unix Socket 控制 ExamAware2 的放映功能，并接收考试事件推送。
             </div>
           </div>
           <div class="settings-item-action">
@@ -159,7 +159,7 @@ const ipcAddress = computed(() => {
     : '/tmp/ExamAware2.examaware2.sock'
 })
 
-const commands = ['ping', 'play-from-url', 'play-from-file', 'stop', 'status']
+const commands = ['ping', 'subscribe-events', 'play-from-url', 'play-from-file', 'stop', 'status']
 
 watch(externalIpcEnabled, (val) => {
   settingsApi.set('externalIpc.enabled', val)
