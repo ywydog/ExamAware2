@@ -42,8 +42,16 @@ class IpcServer {
   // 命令处理器映射
   private handlers: Map<string, (payload: Record<string, any>) => Promise<any>> = new Map()
 
+  // 缓存最近发生的考试事件，用于新订阅客户端立即同步状态
+  private latestEvents: Map<string, ExamEventMessage> = new Map()
+
   // examEventService 事件监听器引用
   private examEventHandler: ((msg: ExamEventMessage) => void) | null = null
+
+  constructor() {
+    // 构造时即注册事件监听，确保任何时刻发生的事件都不会丢失
+    this.setupEventForwarding()
+  }
 
   registerHandler(type: string, handler: (payload: Record<string, any>) => Promise<any>) {
     this.handlers.set(type, handler)
@@ -80,8 +88,6 @@ class IpcServer {
       this.server.listen(address, () => {
         this.isRunning = true
         appLogger.info(`[ipc] IPC 服务器已启动，监听: ${address}`)
-        // 注册考试事件监听，将事件推送给所有已订阅的 IPC 客户端
-        this.setupEventForwarding()
         resolve(true)
       })
     })
@@ -92,6 +98,9 @@ class IpcServer {
 
     // 移除考试事件监听
     this.teardownEventForwarding()
+
+    // 清空缓存事件
+    this.latestEvents.clear()
 
     // 关闭所有客户端连接
     for (const [socket] of this.clients) {
@@ -195,6 +204,8 @@ class IpcServer {
       if (client) {
         client.subscribedEvents = true
         appLogger.info(`[ipc] 客户端 #${client.id} 已订阅考试事件`)
+        // 立即向该客户端推送缓存的最新事件，确保插件连接时已处于触发状态也能收到
+        this.flushLatestEventsToClient(socket, client)
       }
       return { success: true, type: 'subscribe-events', result: 'subscribed' }
     }
@@ -221,10 +232,35 @@ class IpcServer {
     if (this.examEventHandler) return // 已注册
 
     this.examEventHandler = (msg: ExamEventMessage) => {
+      // 缓存最近一次的每种事件，便于新订阅客户端立即同步
+      this.latestEvents.set(msg.event, msg)
       this.broadcastToSubscribedClients(msg)
     }
     examEventService.on('exam-event', this.examEventHandler)
     appLogger.info('[ipc] 已注册考试事件转发监听')
+  }
+
+  /**
+   * 向指定客户端推送缓存的最新事件
+   */
+  private flushLatestEventsToClient(socket: net.Socket, client: ConnectedClient) {
+    if (!client.subscribedEvents || this.latestEvents.size === 0) return
+
+    let sentCount = 0
+    for (const msg of this.latestEvents.values()) {
+      try {
+        if (!socket.destroyed && socket.writable) {
+          socket.write(JSON.stringify(msg) + '\n', 'utf-8')
+          sentCount++
+        }
+      } catch (err: any) {
+        appLogger.debug(`[ipc] 向客户端 #${client.id} 同步历史事件失败: ${err.message}`)
+      }
+    }
+
+    if (sentCount > 0) {
+      appLogger.info(`[ipc] 已向客户端 #${client.id} 同步 ${sentCount} 条历史事件`)
+    }
   }
 
   /**
