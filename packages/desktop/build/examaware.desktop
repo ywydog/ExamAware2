@@ -8,4 +8,4 @@ Icon=examaware
 StartupWMClass=ExamAware
 X-AppImage-Version=1.0.0
 Categories=Education;Office;
-MimeType=application/x-examaware-examjson;
+MimeType=application/x-examaware-ea2;application/x-examaware-json;

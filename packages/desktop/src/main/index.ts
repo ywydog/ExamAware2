@@ -34,6 +34,7 @@ import type { DeepLinkPayload } from '../shared/types/deepLink'
 import { applyDeepLinkControllers } from './deepLink/decorators'
 import { CoreDeepLinkController } from './deepLink/coreDeepLinkController'
 import { composeVersionLabel } from '../shared/appInfo'
+import { parseExamConfig, validateExamConfig } from '@dsz-examaware/core'
 import bannerText from './banner.txt?raw'
 
 protocol.registerSchemesAsPrivileged([
@@ -112,7 +113,6 @@ try {
 
 // 用于存储启动时的文件路径
 let fileToOpen: string | null = null
-
 const ensureTempDir = async (dir: string) => {
   await fs.promises.mkdir(dir, { recursive: true })
   return dir
@@ -179,7 +179,7 @@ if (envEditorData) {
   })
 }
 
-// 单实例锁，确保协议调用复用已有实例
+// 单实例锁：确保协议调用、文件关联、second-instance 都复用已有实例
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
@@ -187,10 +187,26 @@ if (!gotLock) {
 }
 
 app.on('second-instance', (_event, argv) => {
+  appLogger.info('[app] 收到 second-instance', { argv })
+  // 1) 处理 examaware:// 深链接
   const deepLinkArg = argv.find((arg) => arg.startsWith('examaware://'))
   if (deepLinkArg) {
     deepLinkManager.enqueue(deepLinkArg)
   }
+  // 2) 处理 .ea2 / .json 文件路径（文件关联 / OS 拉起）
+  try {
+    const { extractFilePathsFromArgv, openExamConfigFile } =
+      require('./runtime/fileAssociation') as typeof import('./runtime/fileAssociation')
+    const paths = extractFilePathsFromArgv(argv.slice(1))
+    for (const p of paths) {
+      openExamConfigFile(p, { fromOS: true }).catch((err) =>
+        appLogger.error('[app] second-instance open failed', err as Error)
+      )
+    }
+  } catch (err) {
+    appLogger.error('[app] second-instance file processing failed', err as Error)
+  }
+  // 3) 唤起主窗口
   try {
     const main = windowManager.get('main') ?? createMainWindow()
     if (main) {
@@ -286,6 +302,11 @@ app.whenReady().then(async () => {
       appLogger.error('[ipc] fetch url failed', error as Error)
       throw new Error(`拉取 URL 失败: ${error?.message || 'unknown'}`)
     }
+    // 拒绝把非 ExamAware 配置送进播放器
+    const urlConfig = parseExamConfig(data)
+    if (!urlConfig || !validateExamConfig(urlConfig)) {
+      throw new Error('URL 返回内容不是有效的 ExamAware 配置')
+    }
     // 创建临时配置文件并打开播放器（randomUUID 提供充足熵）
     const tempFile = await createTempPlayerFile(data)
     createPlayerWindow(tempFile)
@@ -300,9 +321,28 @@ app.whenReady().then(async () => {
     if (!fs.existsSync(filePath)) {
       throw new Error('文件不存在')
     }
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile()) {
+      throw new Error('不是一个文件')
+    }
+    if (stat.size === 0) {
+      throw new Error('文件内容为空')
+    }
+    if (stat.size > 50 * 1024 * 1024) {
+      throw new Error('文件过大（>50MB）')
+    }
+    const ext = path.extname(filePath).toLowerCase()
+    if (ext !== '.ea2' && ext !== '.json') {
+      throw new Error(`不支持的文件类型: ${ext}（仅支持 .ea2 / .json）`)
+    }
     const data = await fs.promises.readFile(filePath, 'utf-8')
     if (!data.trim()) {
       throw new Error('文件内容为空')
+    }
+    // 拒绝把非 ExamAware 配置送进播放器
+    const config = parseExamConfig(data)
+    if (!config || !validateExamConfig(config)) {
+      throw new Error('文件不是有效的 ExamAware 配置')
     }
     // 创建临时配置文件并打开播放器
     const tempFile = await createTempPlayerFile(data)
@@ -493,9 +533,12 @@ app.whenReady().then(async () => {
     return process.argv.includes('--autostart')
   })()
 
-  // 如果有文件要打开，直接打开编辑器
+  // 如果有文件要打开，根据 fileAssociation.openMode 自动选择 player / editor
   if (fileToOpen) {
-    createEditorWindow(fileToOpen)
+    ;(async () => {
+      const { openExamConfigFile } = await import('./runtime/fileAssociation')
+      await openExamConfigFile(fileToOpen!, { fromOS: true })
+    })()
     fileToOpen = null
   } else if (isAutoStart) {
     // 开机自启：不弹主窗口
@@ -684,24 +727,39 @@ app.on('open-url', (event, url) => {
   deepLinkManager.enqueue(url)
 })
 
-// 处理打开文件的请求（macOS 文件关联）
-app.on('open-file', (event, path) => {
+// 处理打开文件的请求（macOS 文件关联 / Windows 资源管理器双击的 single-instance 转发）
+app.on('open-file', (event, p) => {
   event.preventDefault()
-  if (path.endsWith('.ea2') || path.endsWith('.json')) {
-    if (app.isReady()) {
-      createEditorWindow(path)
-    } else {
-      fileToOpen = path
-    }
+  if (!p) return
+  const { looksLikeFilePath } =
+    require('./runtime/fileAssociation') as typeof import('./runtime/fileAssociation')
+  if (!looksLikeFilePath(p)) {
+    appLogger.warn('[open-file] 忽略非 .ea2/.json 路径', { p })
+    return
+  }
+  if (app.isReady()) {
+    ;(async () => {
+      const { openExamConfigFile } = await import('./runtime/fileAssociation')
+      await openExamConfigFile(p, { fromOS: true })
+    })()
+  } else {
+    fileToOpen = p
   }
 })
 
-// 处理从命令行打开文件（Windows/Linux）
-if (process.argv.length > 1) {
-  const filePath = process.argv[process.argv.length - 1]
-  if (filePath.endsWith('.ea2') || filePath.endsWith('.json')) {
-    fileToOpen = filePath
-  }
+// ====== Single-instance + second-instance 转发 ======
+// 已在启动前段注册 requestSingleInstanceLock() + 'second-instance'，
+// 这里保留 .desktop / 命令行 / Windows 资源管理器双击 .ea2 时的早期 argv 提取。
+function pickArgvFilePath(): string | null {
+  const { extractFilePathsFromArgv } =
+    require('./runtime/fileAssociation') as typeof import('./runtime/fileAssociation')
+  // 跳过 argv[0]（自身可执行路径）
+  const found = extractFilePathsFromArgv(process.argv.slice(1))
+  return found[0] ?? null
+}
+if (!fileToOpen) {
+  const argvFile = pickArgvFilePath()
+  if (argvFile) fileToOpen = argvFile
 }
 
 app.on('window-all-closed', () => {

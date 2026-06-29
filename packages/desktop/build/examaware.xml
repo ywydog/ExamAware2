@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/x-examaware-examjson">
+  <mime-type type="application/x-examaware-ea2">
     <comment>ExamAware 考试档案文件</comment>
     <comment xml:lang="en">ExamAware Exam Archive File</comment>
     <icon name="examaware"/>
     <glob pattern="*.ea2"/>
+    <sub-class-of type="application/json"/>
+  </mime-type>
+  <mime-type type="application/x-examaware-json">
+    <comment>ExamAware 兼容 JSON 配置</comment>
+    <comment xml:lang="en">ExamAware JSON Configuration</comment>
+    <icon name="examaware"/>
+    <glob pattern="*.json"/>
     <sub-class-of type="application/json"/>
   </mime-type>
 </mime-info>

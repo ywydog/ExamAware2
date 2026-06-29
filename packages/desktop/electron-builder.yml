@@ -20,7 +20,13 @@ fileAssociations:
   - ext: ea2
     name: ExamAware 档案文件
     description: ExamAware 考试档案文件
-    mimeType: application/json
+    mimeType: application/x-examaware-ea2
+    role: Editor
+    icon: build/icon
+  - ext: json
+    name: ExamAware JSON 配置
+    description: ExamAware 兼容的 JSON 考试配置
+    mimeType: application/x-examaware-json
     role: Editor
     icon: build/icon
 asarUnpack:
@@ -76,6 +82,38 @@ mac:
         - CFBundleURLName: 'ExamAware Document'
           CFBundleURLSchemes:
             - 'examaware'
+    - CFBundleDocumentTypes:
+        - CFBundleTypeName: 'ExamAware 档案文件'
+          CFBundleTypeRole: 'Editor'
+          LSHandlerRank: 'Owner'
+          LSItemContentTypes:
+            - 'org.examaware.ea2'
+            - 'org.examaware.json'
+        - CFBundleTypeName: 'ExamAware JSON 配置'
+          CFBundleTypeRole: 'Editor'
+          LSHandlerRank: 'Alternate'
+          LSItemContentTypes:
+            - 'public.json'
+    - UTExportedTypeDeclarations:
+        - UTTypeIdentifier: 'org.examaware.ea2'
+          UTTypeDescription: 'ExamAware 考试档案文件'
+          UTTypeConformsTo:
+            - 'public.data'
+            - 'public.content'
+          UTTypeTagSpecification:
+            public.filename-extension:
+              - 'ea2'
+            public.mime-type:
+              - 'application/x-examaware-ea2'
+        - UTTypeIdentifier: 'org.examaware.json'
+          UTTypeDescription: 'ExamAware JSON 配置'
+          UTTypeConformsTo:
+            - 'public.json'
+          UTTypeTagSpecification:
+            public.filename-extension:
+              - 'json'
+            public.mime-type:
+              - 'application/x-examaware-json'
   notarize: false
   hardenedRuntime: true
   gatekeeperAssess: false
@@ -108,7 +146,8 @@ linux:
   maintainer: ExamAware Team <hello@examaware.cn>
   category: Education
   mimeTypes:
-    - application/x-examaware-examjson
+    - application/x-examaware-ea2
+    - application/x-examaware-json
   icon: build/icon.png
 appImage:
   artifactName: ${productName}-${version}.${ext}
@@ -143,6 +182,10 @@ deb:
     - libappindicator1
     - libxtst6
     - libnss3
+  mimeInfo:
+    - build/examaware.xml
+  afterInstall: build/after-install.sh
+  afterRemove: build/after-install.sh
 npmRebuild: false
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/

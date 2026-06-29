@@ -82,6 +82,23 @@
             />
           </div>
         </div>
+
+        <t-divider />
+
+        <div class="settings-item">
+          <div class="settings-item-icon">
+            <TIcon name="file" size="22px" />
+          </div>
+          <div class="settings-item-main">
+            <div class="settings-item-title">默认打开 .ea2 文件</div>
+            <div class="settings-item-desc">
+              双击 .ea2 考试档案时的默认行为：立即放映 / 打开编辑器 / 每次询问。
+            </div>
+          </div>
+          <div class="settings-item-action">
+            <t-select v-model="fileOpenMode" :options="fileOpenModeOptions" style="width: 180px" />
+          </div>
+        </div>
       </t-card>
     </t-space>
   </div>
@@ -126,6 +143,18 @@ const termStart = useSettingRef<string>(
 const trayAutoHide = useSettingRef<boolean>('tray.autoHideOnBlur', true)
 // 保护期毫秒（默认 400ms）
 const trayProtectionMs = useSettingRef<number>('tray.autoHideProtectionMs', 400)
+
+// 文件关联默认行为：player / editor / ask
+type FileOpenMode = 'player' | 'editor' | 'ask'
+const fileOpenMode = useSettingRef<FileOpenMode>('fileAssociation.openMode', 'player', {
+  mapIn: (raw) => (raw === 'editor' || raw === 'ask' ? raw : 'player'),
+  mapOut: (v) => v
+})
+const fileOpenModeOptions = [
+  { label: '立即放映', value: 'player' },
+  { label: '打开编辑器', value: 'editor' },
+  { label: '每次询问', value: 'ask' }
+]
 </script>
 
 <style scoped></style>
