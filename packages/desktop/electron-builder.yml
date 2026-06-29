@@ -182,8 +182,9 @@ deb:
     - libappindicator1
     - libxtst6
     - libnss3
-  mimeInfo:
-    - build/examaware.xml
+  mimeTypes:
+    - application/x-examaware-ea2
+    - application/x-examaware-json
   afterInstall: build/after-install.sh
   afterRemove: build/after-install.sh
 npmRebuild: false
