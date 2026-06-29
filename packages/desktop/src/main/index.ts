@@ -359,10 +359,11 @@ app.whenReady().then(async () => {
     return examEventService.getExamStatus()
   })
 
-  // 启动外部 IPC 服务器（如果配置启用）
+  // 启动外部 IPC 服务器（默认开启：ClassIsland 插件需要此通道控制放映）
+  // 安全模型：仅监听本地命名管道 / Unix 套接字，远端客户端由 allowRemote 单独控制。
   try {
     const { getConfig, onConfigChanged } = await import('./configStore')
-    const externalIpcEnabled = getConfig('externalIpc.enabled', false)
+    const externalIpcEnabled = getConfig('externalIpc.enabled', true)
 
     // 为受限 IPC 命令挂载鉴权：复用 HTTP API 的 token / allowRemote 配置
     ipcServer.setCommandAuthenticator(async (type, socket) => {

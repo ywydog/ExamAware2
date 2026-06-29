@@ -27,7 +27,8 @@
           <div class="settings-item-main">
             <div class="settings-item-title">启用外部 IPC</div>
             <div class="settings-item-desc">
-              允许外部程序（如 ClassIsland 插件）通过 Named Pipe / Unix Socket 控制 ExamAware2 的放映功能，并接收考试事件推送。
+              允许外部程序（如 ClassIsland 插件）通过 Named Pipe / Unix Socket 控制 ExamAware2
+              的放映功能，并接收考试事件推送。
             </div>
           </div>
           <div class="settings-item-action">
@@ -77,8 +78,16 @@
             <div class="settings-item-title">连接状态</div>
             <div class="settings-item-desc">检查是否有外部程序（如 ClassIsland）已连接。</div>
             <div style="margin-top: 4px; display: flex; align-items: center; gap: 8px">
-              <t-tag v-if="connectionStatus" :theme="connectionStatus.clientCount > 0 ? 'success' : 'warning'" variant="light-outline">
-                {{ connectionStatus.clientCount > 0 ? `${connectionStatus.clientCount} 个客户端已连接` : '暂无客户端连接' }}
+              <t-tag
+                v-if="connectionStatus"
+                :theme="connectionStatus.clientCount > 0 ? 'success' : 'warning'"
+                variant="light-outline"
+              >
+                {{
+                  connectionStatus.clientCount > 0
+                    ? `${connectionStatus.clientCount} 个客户端已连接`
+                    : '暂无客户端连接'
+                }}
               </t-tag>
               <t-button
                 variant="outline"
@@ -90,11 +99,16 @@
                 检查连接
               </t-button>
             </div>
-            <div v-if="connectionStatus && connectionStatus.clientCount > 0" style="margin-top: 8px">
-              <div v-for="client in connectionStatus.clients" :key="client.id" style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px">
-                <t-tag variant="light-outline" size="small">
-                  #{{ client.id }}
-                </t-tag>
+            <div
+              v-if="connectionStatus && connectionStatus.clientCount > 0"
+              style="margin-top: 8px"
+            >
+              <div
+                v-for="client in connectionStatus.clients"
+                :key="client.id"
+                style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px"
+              >
+                <t-tag variant="light-outline" size="small"> #{{ client.id }} </t-tag>
                 <t-tag variant="light-outline" size="small">
                   {{ formatTime(client.connectedAt) }}
                 </t-tag>
@@ -148,9 +162,11 @@ const settingsApi = inject('settingsApi') as {
 
 const ipcRenderer = inject('ipcRenderer') as any
 
-const externalIpcEnabled = ref(settingsApi.get('externalIpc.enabled', false))
+const externalIpcEnabled = ref(settingsApi.get('externalIpc.enabled', true))
 const checkingConnection = ref(false)
-const connectionStatus = ref<{ isRunning: boolean; clientCount: number; clients: any[] } | null>(null)
+const connectionStatus = ref<{ isRunning: boolean; clientCount: number; clients: any[] } | null>(
+  null
+)
 
 const ipcAddress = computed(() => {
   if (typeof navigator === 'undefined') return ''
@@ -177,7 +193,9 @@ async function checkConnection() {
     if (status.clientCount > 0) {
       MessagePlugin.success(`检测到 ${status.clientCount} 个外部客户端已连接`)
     } else {
-      MessagePlugin.warning('暂无外部客户端连接。请确保 ClassIsland 已安装 ExamAware2Ci 插件并已启动。')
+      MessagePlugin.warning(
+        '暂无外部客户端连接。请确保 ClassIsland 已安装 ExamAware2Ci 插件并已启动。'
+      )
     }
   } catch (error) {
     MessagePlugin.error('获取连接状态失败')
