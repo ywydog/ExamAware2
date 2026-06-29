@@ -6,11 +6,25 @@ import type { ExamEventMessage } from '../exam/examEventService'
 
 const IPC_NAME = 'ExamAware2.examaware2'
 
-function getIpcAddress(): { address: string; isWindows: boolean } {
-  if (process.platform === 'win32') {
-    return { address: `\\\\.\\pipe\\${IPC_NAME}`, isWindows: true }
+/**
+ * 把 IPC name 规整为 raw name（替换跨平台不合法字符）。
+ * 与客户端 ExamAwareIpcClient.NormalizeIpcName 行为保持一致。
+ */
+function normalizeIpcName(name: string): string {
+  if (!name) return name
+  let n = name
+  if (n.startsWith('\\\\.\\pipe\\')) {
+    n = n.substring('\\\\.\\pipe\\'.length)
   }
-  return { address: `/tmp/${IPC_NAME}.sock`, isWindows: false }
+  return n.replace(/[\\/\s:]/g, '_')
+}
+
+function getIpcAddress(): { address: string; isWindows: boolean } {
+  const name = normalizeIpcName(IPC_NAME)
+  if (process.platform === 'win32') {
+    return { address: `\\\\.\\pipe\\${name}`, isWindows: true }
+  }
+  return { address: `/tmp/${name}.sock`, isWindows: false }
 }
 
 interface IpcRequest {
@@ -48,9 +62,25 @@ class IpcServer {
   // examEventService 事件监听器引用
   private examEventHandler: ((msg: ExamEventMessage) => void) | null = null
 
+  // 可选：受限命令（play-from-url、play-from-file、stop 等）在执行前的鉴权回调
+  // 返回 true 表示放行；false 或抛错表示拒绝。
+  private commandAuthenticator: ((type: string, socket: net.Socket) => Promise<boolean>) | null =
+    null
+
+  // 客户端最大并发数（防止 fd 耗尽）
+  private maxClients = 32
+
   constructor() {
     // 构造时即注册事件监听，确保任何时刻发生的事件都不会丢失
     this.setupEventForwarding()
+  }
+
+  setMaxClients(n: number) {
+    this.maxClients = Math.max(1, n | 0)
+  }
+
+  setCommandAuthenticator(fn: ((type: string, socket: net.Socket) => Promise<boolean>) | null) {
+    this.commandAuthenticator = fn
   }
 
   registerHandler(type: string, handler: (payload: Record<string, any>) => Promise<any>) {
@@ -69,23 +99,38 @@ class IpcServer {
     if (!isWindows) {
       try {
         fs.unlinkSync(address)
-      } catch {
-        // 文件不存在，忽略
+      } catch (err: any) {
+        if (err?.code && err.code !== 'ENOENT') {
+          appLogger.warn(
+            `[ipc] 清理旧 socket 文件失败: ${err.message}（可能因权限问题，listen 仍可能成功）`
+          )
+        }
       }
     }
 
     return new Promise((resolve) => {
-      this.server = net.createServer((socket) => {
+      const server = net.createServer((socket) => {
         this.handleConnection(socket)
       })
 
-      this.server.on('error', (err: any) => {
+      let settled = false
+      const onError = (err: any) => {
+        if (settled) return
+        settled = true
         appLogger.error(`[ipc] IPC 服务器错误: ${err.message}`)
+        try {
+          server.close()
+        } catch {}
         this.isRunning = false
+        this.server = null
         resolve(false)
-      })
+      }
+      server.on('error', onError)
 
-      this.server.listen(address, () => {
+      server.listen(address, () => {
+        if (settled) return
+        settled = true
+        this.server = server
         this.isRunning = true
         appLogger.info(`[ipc] IPC 服务器已启动，监听: ${address}`)
         resolve(true)
@@ -104,7 +149,11 @@ class IpcServer {
 
     // 关闭所有客户端连接
     for (const [socket] of this.clients) {
-      try { socket.destroy() } catch { /* ignore */ }
+      try {
+        socket.destroy()
+      } catch {
+        /* ignore */
+      }
     }
     this.clients.clear()
 
@@ -129,6 +178,16 @@ class IpcServer {
   }
 
   private handleConnection(socket: net.Socket) {
+    if (this.clients.size >= this.maxClients) {
+      appLogger.warn(`[ipc] 拒绝新连接：已达最大客户端数 ${this.maxClients}`)
+      try {
+        socket.end()
+      } catch {}
+      try {
+        socket.destroy()
+      } catch {}
+      return
+    }
     const clientId = this.nextClientId++
     const now = Date.now()
     const client: ConnectedClient = {
@@ -139,7 +198,9 @@ class IpcServer {
       subscribedEvents: false
     }
     this.clients.set(socket, client)
-    appLogger.info(`[ipc] 客户端已连接 #${clientId} (${client.remoteAddress})，当前连接数: ${this.clients.size}`)
+    appLogger.info(
+      `[ipc] 客户端已连接 #${clientId} (${client.remoteAddress})，当前连接数: ${this.clients.size}`
+    )
 
     let buffer = ''
 
@@ -157,10 +218,11 @@ class IpcServer {
 
         this.processMessage(trimmed, socket)
           .then((response) => {
-            const responseStr = JSON.stringify(response) + '\n'
-            socket.write(responseStr, 'utf-8')
+            if (socket.destroyed || !socket.writable) return
+            socket.write(JSON.stringify(response) + '\n', 'utf-8')
           })
           .catch((err) => {
+            if (socket.destroyed || !socket.writable) return
             const errorResponse: IpcResponse = {
               success: false,
               type: 'unknown',
@@ -179,6 +241,9 @@ class IpcServer {
     socket.on('error', (err) => {
       appLogger.debug(`[ipc] 客户端连接错误 #${clientId}: ${err.message}`)
       this.clients.delete(socket)
+      try {
+        socket.destroy()
+      } catch {}
     })
   }
 
@@ -192,6 +257,19 @@ class IpcServer {
 
     const { type, payload } = request
     appLogger.info(`[ipc] 收到命令: ${type}`)
+
+    // ping / subscribe-events 始终允许；其它受限命令需要鉴权
+    const requiresAuth = type !== 'ping' && type !== 'subscribe-events'
+    if (requiresAuth && this.commandAuthenticator && socket) {
+      try {
+        const ok = await this.commandAuthenticator(type, socket)
+        if (!ok) {
+          return { success: false, type, error: '未授权' }
+        }
+      } catch (err: any) {
+        return { success: false, type, error: `鉴权失败: ${err?.message || 'unknown'}` }
+      }
+    }
 
     // ping 命令
     if (type === 'ping') {
@@ -234,6 +312,12 @@ class IpcServer {
     this.examEventHandler = (msg: ExamEventMessage) => {
       // 缓存最近一次的每种事件，便于新订阅客户端立即同步
       this.latestEvents.set(msg.event, msg)
+      // 收到 exam-presentation-stop 表示一个完整的考试放映周期结束，
+      // 此时应清空缓存，避免多轮考试后回放时把上轮的事件带到新客户端造成状态错乱
+      if (msg.event === 'exam-presentation-stop') {
+        this.latestEvents.clear()
+        this.latestEvents.set(msg.event, msg)
+      }
       this.broadcastToSubscribedClients(msg)
     }
     examEventService.on('exam-event', this.examEventHandler)
@@ -246,8 +330,16 @@ class IpcServer {
   private flushLatestEventsToClient(socket: net.Socket, client: ConnectedClient) {
     if (!client.subscribedEvents || this.latestEvents.size === 0) return
 
+    // Map 的迭代顺序是 key 的插入顺序，并不等于事件的时间顺序。
+    // 当同一事件类型被多次更新（key 复用、value 替换）时，按插入序回放会得到错乱的时序，
+    // 例如 [exam-start(new), exam-end(old)]，导致新客户端状态错位。
+    // 这里按时间戳升序排序，保证回放顺序与发生顺序一致。
+    const sortedEvents = Array.from(this.latestEvents.values()).sort(
+      (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0)
+    )
+
     let sentCount = 0
-    for (const msg of this.latestEvents.values()) {
+    for (const msg of sortedEvents) {
       try {
         if (!socket.destroyed && socket.writable) {
           socket.write(JSON.stringify(msg) + '\n', 'utf-8')
@@ -259,7 +351,7 @@ class IpcServer {
     }
 
     if (sentCount > 0) {
-      appLogger.info(`[ipc] 已向客户端 #${client.id} 同步 ${sentCount} 条历史事件`)
+      appLogger.info(`[ipc] 已向客户端 #${client.id} 同步 ${sentCount} 条历史事件（按时间戳排序）`)
     }
   }
 
@@ -276,26 +368,51 @@ class IpcServer {
 
   /**
    * 向所有已订阅考试事件的 IPC 客户端广播事件消息
+   * 处理 write 背压：write() 返回 false 时挂 drain 事件，必要时把 socket 从 clients 移除
    */
   private broadcastToSubscribedClients(msg: ExamEventMessage) {
     const eventStr = JSON.stringify(msg) + '\n'
     let sentCount = 0
+    let backpressured = 0
 
     for (const [socket, client] of this.clients) {
       if (!client.subscribedEvents) continue
 
+      if (socket.destroyed || !socket.writable) {
+        this.clients.delete(socket)
+        continue
+      }
+
       try {
-        if (!socket.destroyed && socket.writable) {
-          socket.write(eventStr, 'utf-8')
-          sentCount++
+        const ok = socket.write(eventStr, 'utf-8')
+        if (ok === false) {
+          backpressured++
+          // 挂一次性 drain 监听；若 socket 在 drain 前被关闭则清理
+          const onDrain = () => {
+            socket.off('error', onError)
+          }
+          const onError = () => {
+            socket.off('drain', onDrain)
+            this.clients.delete(socket)
+          }
+          socket.once('drain', onDrain)
+          socket.once('error', onError)
         }
+        sentCount++
       } catch (err: any) {
         appLogger.debug(`[ipc] 向客户端 #${client.id} 推送事件失败: ${err.message}`)
+        this.clients.delete(socket)
+        try {
+          socket.destroy()
+        } catch {}
       }
     }
 
     if (sentCount > 0) {
-      appLogger.info(`[ipc] 考试事件已推送给 ${sentCount} 个客户端: ${msg.event}`)
+      appLogger.info(
+        `[ipc] 考试事件已推送给 ${sentCount} 个客户端: ${msg.event}` +
+          (backpressured > 0 ? `（其中 ${backpressured} 个处于背压）` : '')
+      )
     }
   }
 

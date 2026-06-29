@@ -68,7 +68,7 @@ class ExamEventService extends EventEmitter {
     })
     // Start periodic status broadcast
     this.startStatusBroadcast()
-    // Register HTTP API routes
+    // Register HTTP API routes (idempotent: 多次调用只会注册一次)
     this.registerApiRoutes()
   }
 
@@ -202,43 +202,48 @@ class ExamEventService extends EventEmitter {
   }
 
   private routesRegistered = false
+  /**
+   * 注册考试相关 HTTP API 路由。
+   * 使用 addPersistentRoute 保证 HTTP 服务重启后路由不丢失。
+   */
   private registerApiRoutes() {
     if (this.routesRegistered) return
     this.routesRegistered = true
-
-    // Register exam API routes
-    httpApiService.registerRoute({
-      method: 'get',
-      path: '/exam/status',
-      namespace: 'exam',
-      summary: '获取当前考试状态',
-      tags: ['exam'],
-      handler: async () => this.getExamStatus()
-    })
-
-    httpApiService.registerRoute({
-      method: 'get',
-      path: '/exam/current',
-      namespace: 'exam',
-      summary: '获取当前进行中的考试',
-      tags: ['exam'],
-      handler: async () => {
-        const status = this.getExamStatus()
-        return status.currentExam
+    const buildRoutes = () => [
+      {
+        method: 'get' as const,
+        path: '/exam/status',
+        namespace: 'exam',
+        summary: '获取当前考试状态',
+        tags: ['exam'],
+        handler: async () => this.getExamStatus()
+      },
+      {
+        method: 'get' as const,
+        path: '/exam/current',
+        namespace: 'exam',
+        summary: '获取当前进行中的考试',
+        tags: ['exam'],
+        handler: async () => {
+          const status = this.getExamStatus()
+          return status.currentExam
+        }
+      },
+      {
+        method: 'get' as const,
+        path: '/exam/list',
+        namespace: 'exam',
+        summary: '获取考试列表',
+        tags: ['exam'],
+        handler: async () => {
+          const status = this.getExamStatus()
+          return { examConfigName: status.examConfigName, exams: status.examList }
+        }
       }
-    })
-
-    httpApiService.registerRoute({
-      method: 'get',
-      path: '/exam/list',
-      namespace: 'exam',
-      summary: '获取考试列表',
-      tags: ['exam'],
-      handler: async () => {
-        const status = this.getExamStatus()
-        return { examConfigName: status.examConfigName, exams: status.examList }
-      }
-    })
+    ]
+    for (const r of buildRoutes()) {
+      httpApiService.addPersistentRoute(() => r)
+    }
   }
 
   async dispose() {

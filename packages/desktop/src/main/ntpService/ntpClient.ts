@@ -32,6 +32,9 @@ const timeSyncInfo: TimeSyncInfo = {
   syncStatus: 'pending'
 }
 
+// 串行化 NTP 同步请求：避免并发请求互相覆盖 offset
+let syncQueue: Promise<TimeSyncInfo> = Promise.resolve(timeSyncInfo) as Promise<TimeSyncInfo>
+
 // 创建 NTP 请求包
 function createNTPPacket(): Buffer {
   const packet = Buffer.alloc(NTP_PACKET_SIZE)
@@ -81,9 +84,16 @@ function parseNTPResponse(
 }
 
 // 同步时间函数
-export async function syncTimeWithNTP(
+export function syncTimeWithNTP(
   ntpServer: string = timeSyncInfo.serverAddress
 ): Promise<TimeSyncInfo> {
+  // 串行化：把新请求挂在队列尾部，避免并发覆盖
+  const next = syncQueue.catch(() => timeSyncInfo).then(() => performSingleSync(ntpServer))
+  syncQueue = next
+  return next
+}
+
+function performSingleSync(ntpServer: string): Promise<TimeSyncInfo> {
   return new Promise((resolve, reject) => {
     // 更新同步状态
     timeSyncInfo.syncStatus = 'pending'
@@ -97,8 +107,6 @@ export async function syncTimeWithNTP(
       try {
         socket.close()
       } catch (e) {
-        // 忽略“Not running”等关闭异常，避免主进程崩溃
-        // 记录一次错误信息便于追踪
         try {
           appLogger.error('[NTP] socket.close error:', e as Error)
         } catch {}
@@ -128,12 +136,14 @@ export async function syncTimeWithNTP(
     socket.on('message', (msg) => {
       clearTimeout(timeoutId)
       try {
+        // 严格校验响应包长度，避免短包导致 Buffer 越界
+        if (!Buffer.isBuffer(msg) || msg.length < NTP_PACKET_SIZE) {
+          throw new Error(`NTP 响应包过短 (len=${msg?.length ?? 0})`)
+        }
         const { serverTime, roundTripDelay } = parseNTPResponse(msg, originateTime)
         const currentLocalTime = Date.now()
-        const offset = serverTime - currentLocalTime
-
-        // 更新时间同步信息
-        timeSyncInfo.offset = offset
+        // 仅在成功解析后才写入 timeSyncInfo
+        timeSyncInfo.offset = serverTime - currentLocalTime
         timeSyncInfo.roundTripDelay = roundTripDelay
         timeSyncInfo.lastSyncTime = currentLocalTime
         timeSyncInfo.syncStatus = 'success'
@@ -141,11 +151,11 @@ export async function syncTimeWithNTP(
 
         safeClose()
         resolve({ ...timeSyncInfo })
-      } catch {
+      } catch (err: any) {
         safeClose()
         timeSyncInfo.syncStatus = 'error'
-        timeSyncInfo.errorMessage = '解析 NTP 响应失败'
-        reject(new Error('解析 NTP 响应失败'))
+        timeSyncInfo.errorMessage = `解析 NTP 响应失败: ${err?.message || 'unknown'}`
+        reject(err instanceof Error ? err : new Error('解析 NTP 响应失败'))
       }
     })
 
@@ -177,8 +187,10 @@ export function getSyncedTime(): number {
   return Date.now() + timeSyncInfo.offset + timeSyncInfo.manualOffset
 }
 
-// 禁用时间同步
+// 禁用时间同步：仅清零 NTP offset，保留用户手动偏移（语义分离）
 export function disableTimeSync(): void {
   timeSyncInfo.syncStatus = 'disabled'
   timeSyncInfo.offset = 0
+  // 注意：manualOffset 不重置，否则会丢失用户的手动校准
+  // 若需要完全重置，调用方应先 setManualOffset(0)
 }

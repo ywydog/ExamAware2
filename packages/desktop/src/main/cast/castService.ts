@@ -27,6 +27,11 @@ export interface CastConfig {
   name: string
   port: number
   shareEnabled: boolean
+  /**
+   * 允许把内容推送到任意主机（不仅是环回 / 私有网段）。
+   * 默认 false：仅在 LAN 内投屏；true：可用于跨网络投屏。
+   */
+  allowRemote?: boolean
 }
 
 export interface CastPeer {
@@ -151,45 +156,81 @@ export class CastService {
 
   private publishBonjour() {
     if (!this.bonjour || !this.config.enabled) return
-    this.published?.stop?.()
-    appLogger.info('[cast] bonjour publish start', {
-      name: this.config.name || 'ExamAware',
-      port: this.config.port,
-      share: this.config.shareEnabled
-    })
-    this.published = this.bonjour.publish({
-      name: this.config.name || 'ExamAware',
-      type: 'examaware',
-      port: this.config.port,
-      host: `${os.hostname?.() || 'examaware'}.local`,
-      txt: {
-        v: app.getVersion?.() || 'dev',
-        share: this.config.shareEnabled ? '1' : '0'
-      }
-    })
-    // Some environments require explicit start()
-    this.published.start?.()
-    this.published?.on('error', (err) => appLogger.error('[cast] publish error', err))
-    this.published?.on('up', () =>
-      appLogger.info('[cast] bonjour publish up', {
-        name: this.published?.name,
-        port: this.published?.port
+    const previous = this.published
+    this.published = null
+    const stopPrev = previous
+      ? new Promise<void>((resolve) => {
+          try {
+            previous.stop?.()
+          } catch {
+            /* 旧 service 关闭时可能已 dispose，吞掉 */
+          }
+          // 兜底：500ms 后强制 resolve，防止 stop 不触发回调导致死锁
+          setTimeout(resolve, 500).unref?.()
+        })
+      : Promise.resolve()
+    stopPrev.then(() => {
+      if (!this.bonjour || !this.config.enabled) return
+      // 净化主机名：mDNSResponder 在 host 含非 ASCII / 特殊字符时会拒绝
+      const rawHost = os.hostname?.() || 'examaware'
+      const safeHost =
+        rawHost
+          .normalize('NFKD')
+          .replace(/[^a-zA-Z0-9-]/g, '-')
+          .replace(/-{2,}/g, '-')
+          .replace(/^-+|-+$/g, '') || 'examaware'
+      appLogger.info('[cast] bonjour publish start', {
+        name: this.config.name || 'ExamAware',
+        port: this.config.port,
+        share: this.config.shareEnabled
       })
-    )
+      this.published = this.bonjour.publish({
+        name: this.config.name || 'ExamAware',
+        type: 'examaware',
+        port: this.config.port,
+        host: `${safeHost}.local`,
+        txt: {
+          v: app.getVersion?.() || 'dev',
+          share: this.config.shareEnabled ? '1' : '0'
+        }
+      })
+      this.published.start?.()
+      this.published?.on('error', (err) => appLogger.error('[cast] publish error', err))
+      this.published?.on('up', () =>
+        appLogger.info('[cast] bonjour publish up', {
+          name: this.published?.name,
+          port: this.published?.port
+        })
+      )
+    })
   }
 
   private startBrowser() {
     if (!this.bonjour) return
-    this.browser?.stop()
-    this.peers.clear()
-    this.browser = this.bonjour.find({ type: 'examaware' })
-    appLogger.info('[cast] bonjour browse start')
-    this.browser.on('up', (service) => this.onServiceUp(service))
-    this.browser.on('down', (service) => this.onServiceDown(service))
-    ;(this.browser as any).on?.('error', (err: Error) =>
-      appLogger.error('[cast] bonjour browse error', err)
-    )
-    this.browser.start?.()
+    const previous = this.browser
+    this.browser = null
+    const stopPrev = previous
+      ? new Promise<void>((resolve) => {
+          try {
+            previous.stop?.()
+          } catch {
+            /* 旧 browser 关闭时可能已 dispose，吞掉 */
+          }
+          setTimeout(resolve, 500).unref?.()
+        })
+      : Promise.resolve()
+    stopPrev.then(() => {
+      if (!this.bonjour) return
+      this.peers.clear()
+      this.browser = this.bonjour.find({ type: 'examaware' })
+      appLogger.info('[cast] bonjour browse start')
+      this.browser.on('up', (service) => this.onServiceUp(service))
+      this.browser.on('down', (service) => this.onServiceDown(service))
+      ;(this.browser as any).on?.('error', (err: Error) =>
+        appLogger.error('[cast] bonjour browse error', err)
+      )
+      this.browser.start?.()
+    })
   }
 
   private isSelfService(host: string, port: number, addresses: string[] = []) {
@@ -253,6 +294,10 @@ export class CastService {
     const peer = this.peers.get(peerId)
     if (!peer) return []
     const url = `http://${peer.host}:${peer.port}/share/list`
+    if (!(await this.assertPeerHostSafe(peer))) {
+      appLogger.warn('[cast] peer host rejected by SSRF guard', { id: peerId, host: peer.host })
+      return []
+    }
     try {
       const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } })
       if (!res.ok) return []
@@ -267,6 +312,9 @@ export class CastService {
   async castToPeer(peerId: string, config: string) {
     const peer = this.peers.get(peerId)
     if (!peer) throw new Error('Peer not found')
+    if (!(await this.assertPeerHostSafe(peer))) {
+      throw new Error('peer host rejected by SSRF guard')
+    }
     const url = `http://${peer.host}:${peer.port}/cast/play`
     const res = await fetch(url, {
       method: 'POST',
@@ -282,6 +330,7 @@ export class CastService {
   async fetchPeerConfig(peerId: string, shareId?: string) {
     const peer = this.peers.get(peerId)
     if (!peer) return null
+    if (!(await this.assertPeerHostSafe(peer))) return null
     const url = `http://${peer.host}:${peer.port}/share/config${shareId ? `?id=${encodeURIComponent(shareId)}` : ''}`
     try {
       const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } })
@@ -292,6 +341,28 @@ export class CastService {
       appLogger.warn('[cast] fetch peer config failed', error as Error)
       return null
     }
+  }
+
+  /**
+   * 校验对端 host 是否在允许的网络范围内：
+   * - shareEnabled 关闭时，禁止所有出站
+   * - allowRemote 开启时，允许任意公网
+   * - 否则只允许环回 / RFC1918 / link-local 等私有地址（局域网投屏场景）
+   */
+  private async assertPeerHostSafe(peer: CastPeer): Promise<boolean> {
+    if (!peer?.host) return false
+    if (!this.config.shareEnabled) return false
+    if (this.config.allowRemote) return true
+    const { isLoopback, isPrivateOrReservedIp, resolveHost } = await import('../http/utils')
+    if (isLoopback(peer.host)) return true
+    if (/^[\d:.]+$/.test(peer.host)) {
+      // host 已是 IP 字面量：仅当为私有/保留地址时允许
+      return isPrivateOrReservedIp(peer.host)
+    }
+    // host 是 hostname：解析后任何地址是私有的就允许
+    const addrs = await resolveHost(peer.host)
+    if (addrs.length === 0) return false
+    return addrs.some((a) => isPrivateOrReservedIp(a))
   }
 
   private async createTempConfigFile(content: string) {
@@ -352,9 +423,15 @@ export class CastService {
     if (!this.config.enabled) return
     await this.stop()
 
-    const port = await findAvailablePort(this.config.port, 10)
+    const { port, shifted } = await findAvailablePort(this.config.port, 10)
+    if (shifted) {
+      appLogger.warn(`[cast] configured port ${this.config.port} is busy, falling back to ${port}`)
+    }
     this.config.port = port
-    await patchConfig({ cast: this.config })
+    // 仅在用户配置的端口与实际端口一致时才持久化，避免覆盖用户的原始配置
+    if (!shifted) {
+      await patchConfig({ cast: this.config })
+    }
 
     await this.ensureBonjourStarted()
     this.publishBonjour()

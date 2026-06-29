@@ -31,6 +31,9 @@ export class HttpApiService {
   private app: Koa | null = null
   private server: import('http').Server | null = null
   private routes: RouteRegistration[] = []
+  // 持久化路由：在每次 start() 时自动重新注册，用于插件 / 子系统的回调式路由。
+  // 这样 HTTP 服务重启后子系统的路由不会丢失。
+  private persistentRoutes: Array<() => RouteRegistration> = []
   private prefix = API_PREFIX
   private limiter = new Map<string, { count: number; resetAt: number }>()
   private swaggerCache: any = null
@@ -310,9 +313,25 @@ export class HttpApiService {
     if (!this.config.enabled) return
     await this.stop()
 
-    const port = await findAvailablePort(this.config.port, 25)
+    // 在每次 start() 时刷新持久化路由（来自插件 / 子系统的回调）
+    for (const factory of this.persistentRoutes) {
+      try {
+        this.routes.push(factory())
+      } catch (err) {
+        appLogger.error('[http] persistent route factory failed', err as Error)
+      }
+    }
+    this.swaggerCache = null
+
+    const { port, shifted } = await findAvailablePort(this.config.port, 25)
+    if (shifted) {
+      appLogger.warn(`[http] configured port ${this.config.port} is busy, falling back to ${port}`)
+    }
     this.config.port = port
-    await patchConfig({ httpApi: this.config })
+    // 仅在用户配置的端口与实际端口一致时才持久化，避免覆盖用户的原始配置
+    if (!shifted) {
+      await patchConfig({ httpApi: this.config })
+    }
 
     this.app = new Koa()
 
@@ -461,6 +480,10 @@ export class HttpApiService {
   }
 
   async stop() {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
     if (this.server && this.upgradeHandler) {
       this.server.removeListener('upgrade', this.upgradeHandler)
     }
@@ -474,6 +497,9 @@ export class HttpApiService {
     }
     this.server = null
     this.app = null
+    // 清空非持久化路由，防止重复注册
+    // 持久化路由会在下次 start() 时由 start() 重新拉取
+    this.routes = []
   }
 
   async restart() {
@@ -486,23 +512,53 @@ export class HttpApiService {
     this.swaggerCache = null
     if (this.app) {
       // rebuild router middleware stack
-      const currentConfig = { ...this.config }
-      this.stop().then(() => {
-        this.config = currentConfig
-        this.start()
-      })
+      this.scheduleRestart()
     }
     return () => {
       this.routes = this.routes.filter((r) => r !== def)
       this.swaggerCache = null
       if (this.app) {
-        const currentConfig = { ...this.config }
-        this.stop().then(() => {
-          this.config = currentConfig
-          this.start()
-        })
+        this.scheduleRestart()
       }
     }
+  }
+
+  /**
+   * 注册"持久化路由"：每次 HTTP 服务 start() 都会重新调用 factory() 拉取最新路由定义。
+   * 用于插件 / 子系统回调式注册的路由——服务重启后路由不会丢失。
+   */
+  addPersistentRoute(factory: () => RouteRegistration) {
+    this.persistentRoutes.push(factory)
+    // 立即也注册到当前 routes 中（如果服务已启动）
+    if (this.app) {
+      try {
+        this.routes.push(factory())
+        this.swaggerCache = null
+        this.scheduleRestart()
+      } catch (err) {
+        appLogger.error('[http] persistent route initial register failed', err as Error)
+      }
+    }
+  }
+
+  private restartTimer: NodeJS.Timeout | null = null
+  /**
+   * 合并多次连续 registerRoute / unregister 调用为单次重启，
+   * 避免 register-then-unregister 风暴触发的 stop/start 竞态。
+   */
+  private scheduleRestart() {
+    if (this.restartTimer) return
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null
+      const currentConfig = { ...this.config }
+      this.stop()
+        .then(() => {
+          this.config = currentConfig
+          return this.start()
+        })
+        .catch((err) => appLogger.error('[http] deferred restart failed', err as Error))
+    }, 50)
+    this.restartTimer.unref?.()
   }
 
   getBaseUrl() {
@@ -516,29 +572,32 @@ export class HttpApiService {
   private setupWebSocket(server: import('http').Server) {
     this.wsServer = new WebSocketServer({ noServer: true })
 
-    const reject = (socket: Socket, status: number) => {
-      socket.write(`HTTP/1.1 ${status} \r\n\r\n`)
+    const reject = (socket: Socket, status: number, reason: string) => {
+      const body = reason ? `\r\n\r\n${reason}` : '\r\n\r\n'
+      socket.write(
+        `HTTP/1.1 ${status} ${reason || 'Forbidden'}\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n${body}`
+      )
       socket.destroy()
     }
 
     this.upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer) => {
       const urlRaw = req.url
-      if (!urlRaw) return reject(socket, 400)
+      if (!urlRaw) return reject(socket, 400, 'Bad Request')
 
       let url: URL
       try {
         url = new URL(urlRaw, `http://${req.headers.host || 'localhost'}`)
       } catch {
-        return reject(socket, 400)
+        return reject(socket, 400, 'Bad Request')
       }
 
       const pathname = url.pathname || ''
       const allowed = pathname === '/ws' || pathname === `${this.prefix}/ws`
-      if (!allowed) return reject(socket, 404)
+      if (!allowed) return reject(socket, 404, 'Not Found')
 
       const remote = req.socket.remoteAddress || ''
       if (!this.config.allowRemote && remote && !isLoopback(remote)) {
-        return reject(socket, 403)
+        return reject(socket, 403, 'Remote access disabled')
       }
 
       const authHeader = (req.headers['authorization'] as string | undefined) || ''
@@ -547,18 +606,51 @@ export class HttpApiService {
       const provided = tokenFromHeader || tokenFromQuery
       const required =
         this.config.tokenRequired || !!this.config.token || (this.config.tokens?.length ?? 0) > 0
+      // WS upgrade 走 GET，因此用 GET 角色校验
       if (required && !this.isTokenValid(provided, 'GET')) {
-        return reject(socket, 401)
+        return reject(socket, 401, 'Unauthorized')
       }
 
-      this.wsServer?.handleUpgrade(req, socket, head, (ws) => {
-        this.wsServer?.emit('connection', ws, req)
-      })
+      // handleUpgrade 之前若 socket 已被对端关闭，handleUpgrade 会抛错
+      if (socket.destroyed) return
+
+      try {
+        this.wsServer?.handleUpgrade(req, socket, head, (ws) => {
+          this.wsServer?.emit('connection', ws, req)
+        })
+      } catch (err) {
+        appLogger.warn('[http] ws upgrade failed', err as Error)
+        try {
+          socket.destroy()
+        } catch {}
+      }
     }
 
     server.on('upgrade', this.upgradeHandler)
 
     this.wsServer.on('connection', (ws, req) => {
+      // 解析订阅 token（仅用于后续消息鉴权）
+      let connToken: string | undefined
+      try {
+        const upgradeUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
+        const authHeader = (req.headers['authorization'] as string | undefined) || ''
+        connToken = authHeader.startsWith('Bearer ')
+          ? authHeader.slice(7)
+          : upgradeUrl.searchParams.get('token') || undefined
+      } catch {
+        connToken = undefined
+      }
+      // 锁定 ws 上能订阅的频道：read 角色只允许 exam-events
+      const connRole: 'read' | 'write' = (() => {
+        if (!connToken) return 'write'
+        const list = this.config.tokens || []
+        const m = list.find((t) => t.value === connToken)
+        if (m?.role === 'read') return 'read'
+        if (m?.role === 'write') return 'write'
+        if (this.config.token && connToken === this.config.token) return 'write'
+        return 'write'
+      })()
+
       ws.send(
         JSON.stringify({
           type: 'welcome',
@@ -578,6 +670,25 @@ export class HttpApiService {
           if (parsed?.type === 'ping') {
             ws.send(JSON.stringify({ type: 'pong', ts: getCurrentTimeMs() }))
           } else if (parsed?.type === 'subscribe' && parsed?.channel === 'exam-events') {
+            // 二次鉴权：连接级 token 必须在当前配置下有效
+            const required =
+              this.config.tokenRequired ||
+              !!this.config.token ||
+              (this.config.tokens?.length ?? 0) > 0
+            if (required && !this.isTokenValid(connToken, 'GET')) {
+              ws.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'unauthorized',
+                  message: 'unauthorized',
+                  ts: getCurrentTimeMs()
+                })
+              )
+              try {
+                ws.close(4401, 'unauthorized')
+              } catch {}
+              return
+            }
             // Subscribe to exam events
             const { examEventService } = require('../../exam/examEventService')
             examEventHandler = (msg: any) => {
@@ -588,12 +699,21 @@ export class HttpApiService {
             }
             examStatusHandler = (status: any) => {
               if (ws.readyState === 1) {
-                ws.send(JSON.stringify({ type: 'exam-status', data: status, ts: getCurrentTimeMs() }))
+                ws.send(
+                  JSON.stringify({ type: 'exam-status', data: status, ts: getCurrentTimeMs() })
+                )
               }
             }
             examEventService.on('exam-event', examEventHandler)
             examEventService.on('exam-status', examStatusHandler)
-            ws.send(JSON.stringify({ type: 'subscribed', channel: 'exam-events', ts: getCurrentTimeMs() }))
+            ws.send(
+              JSON.stringify({
+                type: 'subscribed',
+                channel: 'exam-events',
+                ts: getCurrentTimeMs(),
+                role: connRole
+              })
+            )
           }
         } catch {
           // ignore malformed

@@ -79,14 +79,20 @@ export class DeepLinkManager {
   private parse(raw: string): DeepLinkPayload | null {
     try {
       const parsed = new URL(raw)
-      if (parsed.protocol.replace(':', '') !== this.scheme) return null
+      const scheme = parsed.protocol.replace(':', '')
+      if (scheme !== this.scheme) {
+        appLogger.warn(
+          `[DeepLinkManager] deeplink scheme 不匹配：期望 "${this.scheme}"，实际 "${scheme}"`
+        )
+        return null
+      }
       const query: Record<string, string> = {}
       parsed.searchParams.forEach((value, key) => {
         query[key] = value
       })
       return {
         raw,
-        scheme: parsed.protocol.replace(':', ''),
+        scheme,
         host: parsed.host,
         pathname: parsed.pathname || '/',
         search: parsed.search,

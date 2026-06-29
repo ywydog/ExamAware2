@@ -75,10 +75,21 @@ export function createPlayerWindow(configPath: string): BrowserWindow {
         // 通知主进程存储配置数据
         setSharedConfig(data)
 
-        setTimeout(() => {
-          playerWindow.webContents.send('load-config', data)
-          appLogger.debug('Config file loaded and sent to renderer (len=%d)', data?.length ?? 0)
-        }, 1000)
+        const sendConfig = () => {
+          if (playerWindow.isDestroyed()) return
+          try {
+            playerWindow.webContents.send('load-config', data)
+            appLogger.debug('Config file loaded and sent to renderer (len=%d)', data?.length ?? 0)
+          } catch (error) {
+            appLogger.warn('Failed to send load-config to player renderer', error as Error)
+          }
+        }
+
+        if (playerWindow.webContents.isLoading()) {
+          playerWindow.webContents.once('did-finish-load', sendConfig)
+        } else {
+          sendConfig()
+        }
       })
 
       // 返回清理函数供 WindowManager 调用

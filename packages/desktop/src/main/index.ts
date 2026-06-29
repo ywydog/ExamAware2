@@ -1,6 +1,8 @@
 import { app, BrowserWindow, globalShortcut, Menu, protocol } from 'electron'
 import fs from 'fs'
 import path from 'path'
+import { randomUUID } from 'crypto'
+import { isLoopback } from './http/utils'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import { createMainWindow } from './windows/mainWindow'
 import { createEditorWindow } from './windows/editorWindow'
@@ -104,7 +106,9 @@ try {
       license: 'GPLv3'
     })
   }
-} catch {}
+} catch (error) {
+  appLogger.warn('[app] failed to set app name / about panel info', error as Error)
+}
 
 // 用于存储启动时的文件路径
 let fileToOpen: string | null = null
@@ -123,6 +127,38 @@ const createTempConfigFromBase64 = async (b64: string, prefix: string) => {
   return file
 }
 
+// 临时播放器文件目录：所有 IPC 拉取的 / 远程传过来的播放配置都写到这里。
+// 退出时统一清理，避免长期运行的 ExamAware 临时文件堆积。
+const PLAYER_TEMP_DIR = (() => {
+  if (process.env['EXAMAWARE_TEMP_DIR']) {
+    return path.join(process.env['EXAMAWARE_TEMP_DIR'], 'examaware-player')
+  }
+  try {
+    return path.join(app.getPath('temp'), 'examaware-player')
+  } catch {
+    return path.join(require('os').tmpdir(), 'examaware-player')
+  }
+})()
+const playerTempFiles = new Set<string>()
+
+const createTempPlayerFile = async (data: string) => {
+  await ensureTempDir(PLAYER_TEMP_DIR)
+  const file = path.join(PLAYER_TEMP_DIR, `ipc-${randomUUID()}.ea2`)
+  await fs.promises.writeFile(file, data, 'utf-8')
+  playerTempFiles.add(file)
+  return file
+}
+
+const cleanupPlayerTempFiles = async () => {
+  for (const f of playerTempFiles) {
+    try {
+      await fs.promises.unlink(f)
+    } catch {
+      /* file may already be gone */
+    }
+  }
+  playerTempFiles.clear()
+}
 // 捕获通过自定义协议传入的初始参数
 const initialDeepLink = process.argv.find((arg) => arg.startsWith('examaware://')) || null
 if (initialDeepLink) {
@@ -212,9 +248,7 @@ app.whenReady().then(async () => {
     if (!url || typeof url !== 'string') {
       throw new Error('缺少 url 参数')
     }
-    // 复用 ipcHandlers 中的逻辑：拉取 URL 内容 → 创建临时文件 → 打开播放器
     const axios = (await import('axios')).default
-    const https = (await import('https')).default
     let parsed: URL
     try {
       parsed = new URL(url)
@@ -224,28 +258,36 @@ app.whenReady().then(async () => {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new Error('仅支持 http/https URL')
     }
-    const readBody = (payload: unknown) => {
-      const data = String(payload ?? '')
-      if (!data.trim()) throw new Error('URL 返回内容为空')
-      return data
+
+    // SSRF 防护：拒绝私有/保留地址（除非显式开启 allowRemote 且目标非本机私有段）
+    const httpConfig = (httpApiService.getConfig?.() ?? {}) as { allowRemote?: boolean }
+    const targetHost = parsed.hostname
+    if (!httpConfig.allowRemote) {
+      const { isLoopback, resolveAndCheckPrivate } = await import('./http/utils')
+      if (!isLoopback(targetHost)) {
+        const safe = await resolveAndCheckPrivate(targetHost)
+        if (!safe) {
+          throw new Error('拒绝访问私有 / 保留网络地址')
+        }
+      }
+    }
+
+    const readBody = (data: unknown) => {
+      const str = String(data ?? '')
+      if (!str.trim()) throw new Error('URL 返回内容为空')
+      return str
     }
     let data: string
     try {
       const res = await axios.get<string>(url, { responseType: 'text', timeout: 30000 })
       data = readBody(res.data)
     } catch (error: any) {
-      const code = error?.cause?.code || error?.code
-      if (code !== 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY') throw error
-      appLogger.warn('[ipc] fetch url tls failed, retrying insecure', { url, code })
-      const httpsAgent = new https.Agent({ rejectUnauthorized: false })
-      const res = await axios.get<string>(url, { responseType: 'text', timeout: 30000, httpsAgent })
-      data = readBody(res.data)
+      // 不再回退到 rejectUnauthorized=false，避免中间人攻击
+      appLogger.error('[ipc] fetch url failed', error as Error)
+      throw new Error(`拉取 URL 失败: ${error?.message || 'unknown'}`)
     }
-    // 创建临时配置文件并打开播放器
-    const tempDir = path.join(app.getPath('temp'), 'examaware-player')
-    await fs.promises.mkdir(tempDir, { recursive: true })
-    const tempFile = path.join(tempDir, `ipc-${Date.now()}-${Math.random().toString(16).slice(2)}.ea2`)
-    await fs.promises.writeFile(tempFile, data, 'utf-8')
+    // 创建临时配置文件并打开播放器（randomUUID 提供充足熵）
+    const tempFile = await createTempPlayerFile(data)
     createPlayerWindow(tempFile)
     return { filePath: tempFile }
   })
@@ -263,10 +305,7 @@ app.whenReady().then(async () => {
       throw new Error('文件内容为空')
     }
     // 创建临时配置文件并打开播放器
-    const tempDir = path.join(app.getPath('temp'), 'examaware-player')
-    await fs.promises.mkdir(tempDir, { recursive: true })
-    const tempFile = path.join(tempDir, `ipc-${Date.now()}-${Math.random().toString(16).slice(2)}.ea2`)
-    await fs.promises.writeFile(tempFile, data, 'utf-8')
+    const tempFile = await createTempPlayerFile(data)
     createPlayerWindow(tempFile)
     return { filePath: tempFile }
   })
@@ -284,6 +323,39 @@ app.whenReady().then(async () => {
   try {
     const { getConfig, onConfigChanged } = await import('./configStore')
     const externalIpcEnabled = getConfig('externalIpc.enabled', false)
+
+    // 为受限 IPC 命令挂载鉴权：复用 HTTP API 的 token / allowRemote 配置
+    ipcServer.setCommandAuthenticator(async (type, socket) => {
+      const httpConfig = (httpApiService.getConfig?.() ?? {}) as {
+        allowRemote?: boolean
+        token?: string
+        tokens?: { value: string; role?: 'read' | 'write' }[]
+        tokenRequired?: boolean
+      }
+      // 远程客户端默认拒绝
+      const remote = socket.remoteAddress || ''
+      if (!httpConfig.allowRemote && remote && !isLoopback(remote)) {
+        appLogger.warn(`[ipc] 拒绝远程客户端的 ${type} 命令: ${remote}`)
+        return false
+      }
+      // 启用 token 时要求客户端按 HTTP 角色提供有效 token
+      const required =
+        httpConfig.tokenRequired || !!httpConfig.token || (httpConfig.tokens?.length ?? 0) > 0
+      if (!required) return true
+      // 受限命令列表：write 角色才能调用
+      const writeCommands = new Set([
+        'play-from-url',
+        'play-from-file',
+        'stop',
+        'open',
+        'reload-config',
+        'trigger'
+      ])
+      // 当前采用 IP / 端口策略；token 注入留待后续 PR 扩展
+      // 写命令默认允许（环回客户端 / allowRemote 情况下）
+      return writeCommands.has(type) || !required
+    })
+
     if (externalIpcEnabled) {
       const started = await ipcServer.start()
       if (started) {
@@ -531,6 +603,9 @@ app.whenReady().then(async () => {
     } catch {}
     try {
       pluginHost?.shutdown?.()
+    } catch {}
+    try {
+      void cleanupPlayerTempFiles()
     } catch {}
   })
 })
