@@ -431,6 +431,124 @@ class IpcServer {
       clients: Array.from(this.clients.values())
     }
   }
+
+  /**
+   * 主动建立一次客户端连接，向 IPC 端点发送 `ping` 并等待响应。
+   * 用于 UI 上的"测试 IPC 通信"按钮，验证管道/套接字可连通且 IPC 协议工作正常。
+   *
+   * @param timeoutMs 连接 + ping 的总超时（毫秒）
+   */
+  async testConnection(
+    timeoutMs = 3000
+  ): Promise<{ success: boolean; error?: string; response?: string; address: string }> {
+    const { address, isWindows } = getIpcAddress()
+
+    return new Promise((resolve) => {
+      let settled = false
+      const settle = (result: {
+        success: boolean
+        error?: string
+        response?: string
+        address: string
+      }) => {
+        if (settled) return
+        settled = true
+        resolve(result)
+      }
+
+      let socket: net.Socket
+      try {
+        socket = net.createConnection(address)
+      } catch (err: any) {
+        settle({ success: false, error: `创建连接失败: ${err?.message || err}`, address })
+        return
+      }
+
+      let buf = ''
+      let connectTimeout: NodeJS.Timeout | null = null
+
+      const cleanup = () => {
+        if (connectTimeout) clearTimeout(connectTimeout)
+        try {
+          socket.destroy()
+        } catch {
+          /* ignore */
+        }
+      }
+
+      connectTimeout = setTimeout(() => {
+        cleanup()
+        settle({
+          success: false,
+          error: `连接超时（${timeoutMs}ms）。服务未运行或管道/套接字不可达。`,
+          address
+        })
+      }, timeoutMs)
+
+      socket.setEncoding('utf-8')
+
+      socket.once('connect', () => {
+        // 连接成功，发 ping
+        const req = JSON.stringify({ type: 'ping', payload: {} }) + '\n'
+        try {
+          socket.write(req, 'utf-8')
+        } catch (err: any) {
+          cleanup()
+          settle({ success: false, error: `发送 ping 失败: ${err?.message || err}`, address })
+        }
+      })
+
+      socket.on('data', (chunk: string) => {
+        buf += chunk
+        const idx = buf.indexOf('\n')
+        if (idx >= 0) {
+          const line = buf.slice(0, idx).trim()
+          cleanup()
+          if (!line) {
+            settle({ success: false, error: '收到空响应', address })
+            return
+          }
+          try {
+            const parsed = JSON.parse(line)
+            const ok = parsed?.success === true && parsed?.type === 'ping'
+            settle({
+              success: ok,
+              error: ok ? undefined : `响应异常: ${parsed?.error || line.slice(0, 200)}`,
+              response: line,
+              address
+            })
+          } catch (err: any) {
+            settle({
+              success: false,
+              error: `响应解析失败: ${err?.message || err}`,
+              response: line,
+              address
+            })
+          }
+        }
+      })
+
+      socket.once('error', (err: any) => {
+        cleanup()
+        const code = err?.code ? ` [${err.code}]` : ''
+        const detail =
+          isWindows && err?.code === 'ENOENT' ? '（命名管道不存在，请确认服务已启动）' : ''
+        settle({
+          success: false,
+          error: `连接错误${code}: ${err?.message || err}${detail}`,
+          address
+        })
+      })
+
+      socket.once('close', () => {
+        // 正常关闭但未收到响应
+        if (!settled) {
+          cleanup()
+          settle({ success: false, error: '连接已关闭，未收到响应', address })
+        }
+      })
+    })
+  }
 }
 
 export const ipcServer = new IpcServer()

@@ -124,6 +124,62 @@
             <TIcon name="control-platform" size="22px" />
           </div>
           <div class="settings-item-main">
+            <div class="settings-item-title">测试 IPC 通信</div>
+            <div class="settings-item-desc">
+              主动连接 IPC 端点并发送 <code>ping</code>，验证管道/套接字可连通。
+            </div>
+            <div
+              style="margin-top: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap"
+            >
+              <t-button
+                variant="outline"
+                size="small"
+                :disabled="!externalIpcEnabled"
+                :loading="testingConnection"
+                @click="testIpcConnection"
+              >
+                测试 IPC 通信
+              </t-button>
+              <t-tag
+                v-if="testResult"
+                :theme="testResult.success ? 'success' : 'danger'"
+                variant="light-outline"
+              >
+                {{ testResult.success ? '连接成功' : '连接失败' }}
+              </t-tag>
+            </div>
+            <div
+              v-if="testResult && !testResult.success && testResult.error"
+              style="
+                margin-top: 6px;
+                font-size: 12px;
+                color: var(--td-text-color-secondary);
+                word-break: break-all;
+              "
+            >
+              {{ testResult.error }}
+            </div>
+            <div
+              v-else-if="testResult && testResult.success"
+              style="
+                margin-top: 6px;
+                font-size: 12px;
+                color: var(--td-text-color-secondary);
+                word-break: break-all;
+              "
+            >
+              已与 {{ testResult.address }} 成功建立连接并完成 ping。
+            </div>
+          </div>
+        </div>
+
+        <t-divider />
+
+        <div class="settings-item">
+          <div class="settings-item-icon">
+            <TIcon name="control-platform" size="22px" />
+          </div>
+          <div class="settings-item-main">
             <div class="settings-item-title">支持的命令</div>
             <div class="settings-item-desc">外部程序可发送的 IPC 命令。</div>
             <div style="margin-top: 4px">
@@ -138,6 +194,8 @@
             </div>
           </div>
         </div>
+
+        <t-divider />
 
         <t-alert
           v-if="externalIpcEnabled"
@@ -164,9 +222,11 @@ const ipcRenderer = inject('ipcRenderer') as any
 
 const externalIpcEnabled = ref(settingsApi.get('externalIpc.enabled', true))
 const checkingConnection = ref(false)
+const testingConnection = ref(false)
 const connectionStatus = ref<{ isRunning: boolean; clientCount: number; clients: any[] } | null>(
   null
 )
+const testResult = ref<{ success: boolean; error?: string; address: string } | null>(null)
 
 const ipcAddress = computed(() => {
   if (typeof navigator === 'undefined') return ''
@@ -182,6 +242,7 @@ watch(externalIpcEnabled, (val) => {
   // 关闭时清除连接状态
   if (!val) {
     connectionStatus.value = null
+    testResult.value = null
   }
 })
 
@@ -202,6 +263,29 @@ async function checkConnection() {
     connectionStatus.value = null
   } finally {
     checkingConnection.value = false
+  }
+}
+
+async function testIpcConnection() {
+  testingConnection.value = true
+  testResult.value = null
+  try {
+    const result = await ipcRenderer.invoke('external-ipc:test-connection')
+    testResult.value = {
+      success: !!result?.success,
+      error: result?.error,
+      address: result?.address ?? ''
+    }
+    if (result?.success) {
+      MessagePlugin.success(`IPC 通信正常 (${result.address})`)
+    } else {
+      MessagePlugin.error(`IPC 通信失败：${result?.error || '未知错误'}`)
+    }
+  } catch (error: any) {
+    testResult.value = { success: false, error: String(error?.message || error), address: '' }
+    MessagePlugin.error('测试 IPC 通信失败')
+  } finally {
+    testingConnection.value = false
   }
 }
 

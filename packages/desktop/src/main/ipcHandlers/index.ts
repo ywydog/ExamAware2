@@ -228,6 +228,26 @@ export function registerIpcHandlers(ctx?: MainContext): () => void {
       })
     )
 
+  // 外部 IPC 主动测试：建连 + ping
+  if (ctx)
+    ctx.ipc.handle('external-ipc:test-connection', async () => {
+      appLogger.info('[ipc] 收到测试 IPC 通信请求')
+      const result = await ipcServer.testConnection(3000)
+      if (result.success) {
+        appLogger.info(`[ipc] 测试 IPC 通信成功 (${result.address})`)
+      } else {
+        appLogger.warn(`[ipc] 测试 IPC 通信失败: ${result.error}`)
+      }
+      return result
+    })
+  else
+    group.add(
+      handle('external-ipc:test-connection', async () => {
+        const result = await ipcServer.testConnection(3000)
+        return result
+      })
+    )
+
   // Handle set config data (called from playerWindow)
   if (ctx)
     ctx.ipc.on('set-config', (_event, data: string) => {
