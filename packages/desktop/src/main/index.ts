@@ -186,7 +186,7 @@ if (!gotLock) {
   process.exit(0)
 }
 
-app.on('second-instance', (_event, argv) => {
+app.on('second-instance', async (_event, argv) => {
   appLogger.info('[app] 收到 second-instance', { argv })
   // 1) 处理 examaware:// 深链接
   const deepLinkArg = argv.find((arg) => arg.startsWith('examaware://'))
@@ -194,28 +194,44 @@ app.on('second-instance', (_event, argv) => {
     deepLinkManager.enqueue(deepLinkArg)
   }
   // 2) 处理 .ea2 / .json 文件路径（文件关联 / OS 拉起）
+  //    记录本次究竟打开了哪个窗口，第三步据此聚焦，而不是无脑聚焦主窗口
+  let openedPlayer = false
+  let openedEditor = false
   try {
     const { extractFilePathsFromArgv, openExamConfigFile } =
       require('./runtime/fileAssociation') as typeof import('./runtime/fileAssociation')
     const paths = extractFilePathsFromArgv(argv.slice(1))
     for (const p of paths) {
-      openExamConfigFile(p, { fromOS: true }).catch((err) =>
+      try {
+        const result = await openExamConfigFile(p, { fromOS: true })
+        if (result === 'player') openedPlayer = true
+        else if (result === 'editor') openedEditor = true
+      } catch (err) {
         appLogger.error('[app] second-instance open failed', err as Error)
-      )
+      }
     }
   } catch (err) {
     appLogger.error('[app] second-instance file processing failed', err as Error)
   }
-  // 3) 唤起主窗口
+  // 3) 唤起对应窗口：玩家优先于编辑器优先于主窗口
+  //    避免"主窗口盖在播放器上面"导致用户看到主界面而不是正在播放
   try {
-    const main = windowManager.get('main') ?? createMainWindow()
-    if (main) {
-      if (main.isMinimized()) main.restore()
-      if (!main.isVisible()) main.show()
-      main.focus()
+    let target: BrowserWindow | undefined
+    if (openedPlayer) {
+      target = windowManager.get('player')
+    } else if (openedEditor) {
+      target = windowManager.get('editor')
+    } else {
+      // 没有打开文件：唤起主窗口（必要时创建）
+      target = windowManager.get('main') ?? createMainWindow()
+    }
+    if (target) {
+      if (target.isMinimized()) target.restore()
+      if (!target.isVisible()) target.show()
+      target.focus()
     }
   } catch (error) {
-    appLogger.error('[deeplink] failed to revive main window on second-instance', error as Error)
+    appLogger.error('[app] failed to revive window on second-instance', error as Error)
   }
 })
 
@@ -732,16 +748,32 @@ app.on('open-url', (event, url) => {
 app.on('open-file', (event, p) => {
   event.preventDefault()
   if (!p) return
-  const { looksLikeFilePath } =
+  const { looksLikeFilePath, openExamConfigFile } =
     require('./runtime/fileAssociation') as typeof import('./runtime/fileAssociation')
   if (!looksLikeFilePath(p)) {
     appLogger.warn('[open-file] 忽略非 .ea2/.json 路径', { p })
     return
   }
+  const focusAfterOpen = (mode: 'player' | 'editor') => {
+    // 文件刚被打开（播放器 / 编辑器），把对应窗口拉到前面，
+    // 避免"主窗口盖在上面"导致用户以为没在播放
+    try {
+      const target = windowManager.get(mode)
+      if (target) {
+        if (target.isMinimized()) target.restore()
+        if (!target.isVisible()) target.show()
+        target.focus()
+      }
+    } catch (e) {
+      appLogger.warn('[open-file] focus target window failed', e as Error)
+    }
+  }
   if (app.isReady()) {
     ;(async () => {
-      const { openExamConfigFile } = await import('./runtime/fileAssociation')
-      await openExamConfigFile(p, { fromOS: true })
+      const result = await openExamConfigFile(p, { fromOS: true })
+      if (result === 'player' || result === 'editor') {
+        focusAfterOpen(result)
+      }
     })()
   } else {
     fileToOpen = p

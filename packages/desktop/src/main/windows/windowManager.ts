@@ -67,7 +67,12 @@ export class WindowManager {
         if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
           return `${process.env['ELECTRON_RENDERER_URL']}#/${route}`
         }
-        return { file: path.resolve(__dirname, '../renderer/index.html'), hash: route }
+        // 注意：hash 路径必须以 "/" 开头，与 Vue Router 的 createWebHashHistory 匹配
+        // （否则路由会落到默认的 MainpageView，让"播放器窗口"看起来像主界面）
+        return {
+          file: path.resolve(__dirname, '../renderer/index.html'),
+          hash: `/${route}`
+        }
       },
       commonOptions: () => ({
         show: false,
