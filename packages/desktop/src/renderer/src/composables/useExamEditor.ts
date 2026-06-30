@@ -623,6 +623,38 @@ export function useExamEditor() {
     }
   }
 
+  // 通用：从文件路径读取并加载到当前编辑器（拉/推模式共用）
+  const openStartupFile = async (filePath: string) => {
+    try {
+      console.log('Opening file at startup:', filePath)
+      const content = await window.api?.readFile(filePath)
+      if (content) {
+        const success = configManager.loadFromJson(content)
+        if (success) {
+          currentExamIndex.value = null
+          currentFilePath.value = filePath
+          isFileModified.value = false
+          isNewFile.value = false
+
+          MessageService.success('文件打开成功')
+          console.log('文件打开成功')
+        } else {
+          MessageService.error('文件打开失败：文件格式不正确')
+          console.error('文件打开失败：文件格式不正确')
+        }
+      } else {
+        MessageService.error('文件读取失败')
+        console.error('文件读取失败')
+      }
+    } catch (error) {
+      MessageService.error('文件打开失败')
+      console.error('文件打开失败:', error)
+    }
+  }
+
+  // onOpenFileAtStartup 注册时返回的 off 函数（onUnmounted 调用以避免 HMR 累积）
+  let offOpenFileAtStartup: (() => void) | null = null
+
   // 生命周期
   // 生命周期
   onMounted(() => {
@@ -717,43 +749,34 @@ export function useExamEditor() {
     document.addEventListener('visibilitychange', handleVisibility)
     window.addEventListener('pagehide', handlePageHide)
 
-    // 监听启动时打开文件的事件
-    window.electronAPI?.onOpenFileAtStartup?.(async (filePath: string) => {
+    // 打开"启动文件"（冷启动时主进程记录的待打开路径）。
+    // 拉模式：避免之前 ready-to-show 推送与 onMounted 注册监听器之间的竞态丢事件。
+    void (async () => {
       try {
-        console.log('Opening file at startup:', filePath)
-        const content = await window.api?.readFile(filePath)
-        if (content) {
-          const success = configManager.loadFromJson(content)
-          if (success) {
-            currentExamIndex.value = null
-            currentFilePath.value = filePath
-            isFileModified.value = false
-            isNewFile.value = false
-
-            MessageService.success('文件打开成功')
-            console.log('文件打开成功')
-          } else {
-            MessageService.error('文件打开失败：文件格式不正确')
-            console.error('文件打开失败：文件格式不正确')
-          }
-        } else {
-          MessageService.error('文件读取失败')
-          console.error('文件读取失败')
+        const pending = await window.electronAPI?.consumeEditorStartupFile?.()
+        if (pending) {
+          await openStartupFile(pending)
         }
-      } catch (error) {
-        MessageService.error('文件打开失败')
-        console.error('文件打开失败:', error)
+      } catch (err) {
+        console.error('拉取启动文件失败:', err)
       }
-    })
+    })()
+
+    // 推模式：处理"窗口已开时收到新文件"（主进程走 editorWindow.revive → 推送）。
+    offOpenFileAtStartup =
+      window.electronAPI?.onOpenFileAtStartup?.(async (filePath: string) => {
+        await openStartupFile(filePath)
+      }) ?? null
   })
 
   onUnmounted(() => {
     historyStore.flushAllDebounced()
     configManager.removeListener(configListener)
     keyboardManager.stopListening()
-    // 清理监听
-    // 注意：此处无法直接移除在 onMounted 中声明的本地函数，
-    // 因此建议使用相同引用移除（若需要更严格，可将处理器提升到外层变量）。
+    // 解除 open-file-at-startup 监听器，避免 HMR / 重复挂载累积
+    try {
+      offOpenFileAtStartup?.()
+    } catch {}
   })
 
   return {

@@ -30,7 +30,23 @@ export class ConfigLoader {
 
   private listeners: ((state: ConfigLoadState) => void)[] = []
 
-  constructor(private ipcRenderer?: any) {}
+  constructor(private ipcRenderer?: any) {
+    // 持续监听主进程推送的 load-config：
+    // 旧实现只在 loadFromIPC 第一次成功时自移除监听器，
+    // 导致"播放器已开 → 又被传入新文件"时新配置被丢。
+    // 这里挂一个常驻监听器，每次收到都更新 state 并通知订阅者重渲染。
+    if (ipcRenderer && typeof ipcRenderer.on === 'function') {
+      ipcRenderer.on('load-config', (_event: any, data: string) => {
+        try {
+          const config = this.parseAndValidateConfig(data)
+          this.setSuccess(config, { type: 'ipc' })
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : '未知错误'
+          this.setError(`IPC 数据解析失败: ${errorMessage}`)
+        }
+      })
+    }
+  }
 
   // 添加状态监听器
   onStateChange(listener: (state: ConfigLoadState) => void) {

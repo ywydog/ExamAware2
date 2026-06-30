@@ -16,6 +16,12 @@ export interface WindowFactoryResult {
   route: string
   options: Electron.BrowserWindowConstructorOptions
   setup?: (win: BrowserWindow) => void | (() => void)
+  /**
+   * 当 windowManager 复用已存在的窗口时调用（典型场景：外部"播放/编辑"调用传入新文件路径）。
+   * 工厂可以用它来通知 renderer 处理新参数（重新加载文件等），
+   * 避免"setup 不执行 → 新参数被丢弃"的问题。
+   */
+  revive?: (win: BrowserWindow) => void
   externalOpenHandler?: boolean
 }
 
@@ -86,7 +92,7 @@ export class WindowManager {
       })
     }
 
-    const { id, route, options, setup, externalOpenHandler = true } = factory(ctx)
+    const { id, route, options, setup, revive, externalOpenHandler = true } = factory(ctx)
 
     const existing = this.windows.get(id)
     if (existing && !existing.win.isDestroyed() && !forceRecreate) {
@@ -103,6 +109,14 @@ export class WindowManager {
         }
         if (didRevive && !win.isFocused()) {
           win.focus()
+        }
+        // 复用现有窗口时，给工厂一次机会处理新参数（例如传入新文件路径）
+        if (revive) {
+          try {
+            revive(win)
+          } catch (error) {
+            appLogger.error('[windowManager] revive callback failed', error as Error)
+          }
         }
       } catch (error) {
         appLogger.error('[windowManager] failed to revive existing window', error as Error)

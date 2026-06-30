@@ -1,11 +1,11 @@
 import { app, BrowserWindow, globalShortcut, Menu, protocol } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import { randomUUID } from 'crypto'
 import { isLoopback } from './http/utils'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
+import { createTempPlayerFile, cleanupPlayerTempFiles } from './runtime/playerTempFile'
 import { createMainWindow } from './windows/mainWindow'
-import { createEditorWindow } from './windows/editorWindow'
+import { createEditorWindow, registerEditorStartupFileIpc } from './windows/editorWindow'
 import { createSettingsWindow } from './windows/settingsWindow'
 import { createPlayerWindow } from './windows/playerWindow'
 import { windowManager } from './windows/windowManager'
@@ -127,38 +127,6 @@ const createTempConfigFromBase64 = async (b64: string, prefix: string) => {
   return file
 }
 
-// 临时播放器文件目录：所有 IPC 拉取的 / 远程传过来的播放配置都写到这里。
-// 退出时统一清理，避免长期运行的 ExamAware 临时文件堆积。
-const PLAYER_TEMP_DIR = (() => {
-  if (process.env['EXAMAWARE_TEMP_DIR']) {
-    return path.join(process.env['EXAMAWARE_TEMP_DIR'], 'examaware-player')
-  }
-  try {
-    return path.join(app.getPath('temp'), 'examaware-player')
-  } catch {
-    return path.join(require('os').tmpdir(), 'examaware-player')
-  }
-})()
-const playerTempFiles = new Set<string>()
-
-const createTempPlayerFile = async (data: string) => {
-  await ensureTempDir(PLAYER_TEMP_DIR)
-  const file = path.join(PLAYER_TEMP_DIR, `ipc-${randomUUID()}.ea2`)
-  await fs.promises.writeFile(file, data, 'utf-8')
-  playerTempFiles.add(file)
-  return file
-}
-
-const cleanupPlayerTempFiles = async () => {
-  for (const f of playerTempFiles) {
-    try {
-      await fs.promises.unlink(f)
-    } catch {
-      /* file may already be gone */
-    }
-  }
-  playerTempFiles.clear()
-}
 // 捕获通过自定义协议传入的初始参数
 const initialDeepLink = process.argv.find((arg) => arg.startsWith('examaware://')) || null
 if (initialDeepLink) {
@@ -247,6 +215,8 @@ app.whenReady().then(async () => {
   })
 
   const disposeIpc = registerIpcHandlers(_mainCtx)
+  // 编辑器"启动时打开文件"用拉模式：renderer 在 onMounted 主动调用
+  registerEditorStartupFileIpc()
   // macOS 常用快捷键：Command+逗号 打开设置（聚焦“关于”页可由二级逻辑决定，这里默认普通设置首页）
   try {
     globalShortcut.register('CommandOrControl+,', () => {
@@ -323,8 +293,8 @@ app.whenReady().then(async () => {
     if (!urlConfig || !validateExamConfig(urlConfig)) {
       throw new Error('URL 返回内容不是有效的 ExamAware 配置')
     }
-    // 创建临时配置文件并打开播放器（randomUUID 提供充足熵）
-    const tempFile = await createTempPlayerFile(data)
+    // 创建临时配置文件并打开播放器（统一在 playerTempFile.ts 里登记退出清理）
+    const tempFile = await createTempPlayerFile(data, 'ipc')
     createPlayerWindow(tempFile)
     return { filePath: tempFile }
   })
@@ -361,7 +331,7 @@ app.whenReady().then(async () => {
       throw new Error('文件不是有效的 ExamAware 配置')
     }
     // 创建临时配置文件并打开播放器
-    const tempFile = await createTempPlayerFile(data)
+    const tempFile = await createTempPlayerFile(data, 'ipc')
     createPlayerWindow(tempFile)
     return { filePath: tempFile }
   })

@@ -6,6 +6,35 @@ import { appLogger } from '../logging/winstonLogger'
 import { setSharedConfig } from '../state/sharedConfigStore'
 
 export function createPlayerWindow(configPath: string): BrowserWindow {
+  // 抽取"读取文件 → 写共享配置 → 通知 renderer"的逻辑，
+  // 让 setup（新建窗口）和 revive（复用窗口，传入新文件）共用同一份实现。
+  const loadAndSend = (playerWindow: BrowserWindow) => {
+    fs.readFile(configPath, 'utf-8', (err, data) => {
+      if (err) {
+        appLogger.error('Failed to read config file', err as Error)
+        return
+      }
+
+      setSharedConfig(data)
+
+      const sendConfig = () => {
+        if (playerWindow.isDestroyed()) return
+        try {
+          playerWindow.webContents.send('load-config', data)
+          appLogger.debug('Config file loaded and sent to renderer (len=%d)', data?.length ?? 0)
+        } catch (error) {
+          appLogger.warn('Failed to send load-config to player renderer', error as Error)
+        }
+      }
+
+      if (playerWindow.webContents.isLoading()) {
+        playerWindow.webContents.once('did-finish-load', sendConfig)
+      } else {
+        sendConfig()
+      }
+    })
+  }
+
   return windowManager.open(({ commonOptions }) => ({
     id: 'player',
     route: 'playerview',
@@ -66,36 +95,17 @@ export function createPlayerWindow(configPath: string): BrowserWindow {
         }
       })
 
-      fs.readFile(configPath, 'utf-8', (err, data) => {
-        if (err) {
-          appLogger.error('Failed to read config file', err as Error)
-          return
-        }
-
-        // 通知主进程存储配置数据
-        setSharedConfig(data)
-
-        const sendConfig = () => {
-          if (playerWindow.isDestroyed()) return
-          try {
-            playerWindow.webContents.send('load-config', data)
-            appLogger.debug('Config file loaded and sent to renderer (len=%d)', data?.length ?? 0)
-          } catch (error) {
-            appLogger.warn('Failed to send load-config to player renderer', error as Error)
-          }
-        }
-
-        if (playerWindow.webContents.isLoading()) {
-          playerWindow.webContents.once('did-finish-load', sendConfig)
-        } else {
-          sendConfig()
-        }
-      })
+      loadAndSend(playerWindow)
 
       // 返回清理函数供 WindowManager 调用
       return () => {
         ipcMain.off(exitChannel, onRendererExit)
       }
+    },
+    // 窗口已存在时收到新文件路径：重新读取并通知现有 renderer
+    revive: (playerWindow) => {
+      appLogger.info('[player] 复用现有窗口，载入新文件', { configPath })
+      loadAndSend(playerWindow)
     }
   })) as unknown as BrowserWindow
 }

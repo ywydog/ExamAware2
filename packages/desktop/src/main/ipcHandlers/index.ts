@@ -19,6 +19,7 @@ import { createPlayerWindow } from '../windows/playerWindow'
 import { createCastWindow } from '../windows/castWindow'
 import { fileApi } from '../fileUtils'
 import { createLogsWindow } from '../windows/logsWindow'
+import { createTempPlayerFile } from '../runtime/playerTempFile'
 import {
   getAllConfig,
   getConfig as cfgGet,
@@ -86,19 +87,18 @@ export function registerIpcHandlers(ctx?: MainContext): () => void {
   )
   group.add(disposeIpcDecorators)
   const createTempPlayerConfig = async (data: string) => {
-    const tempDir = path.join(app.getPath('temp'), 'examaware-player')
-    await fs.promises.mkdir(tempDir, { recursive: true })
-    const tempFile = path.join(
-      tempDir,
-      `editor-${Date.now()}-${Math.random().toString(16).slice(2)}.ea2`
-    )
-    await fs.promises.writeFile(tempFile, data, 'utf-8')
-    return tempFile
+    // 统一通过 playerTempFile.ts 创建，确保退出时被 cleanupPlayerTempFiles 清理
+    return createTempPlayerFile(data, 'editor')
   }
 
   const openPlayerFromEditor = async (data: string) => {
     if (typeof data !== 'string' || !data.trim()) {
       throw new Error('无效的考试配置数据')
+    }
+    // 拒绝把非 ExamAware 配置送进播放器（与 play-from-file 行为对齐）
+    const config = parseExamConfig(data)
+    if (!config || !validateExamConfig(config)) {
+      throw new Error('编辑器数据不是有效的 ExamAware 配置')
     }
     const filePath = await createTempPlayerConfig(data)
     createPlayerWindow(filePath)

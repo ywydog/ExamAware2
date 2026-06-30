@@ -162,8 +162,18 @@ const windowAPI = {
   isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
   setupListeners: () => ipcRenderer.send('setup-window-listeners'),
   platform: process.platform, // 在 preload 中可以安全访问 process
+  // 拉模式：renderer 在 onMounted 主动取"启动时打开的文件路径"。
+  // 替代旧实现（ready-to-show 推 open-file-at-startup 事件），避免竞态丢事件。
+  consumeEditorStartupFile: () =>
+    ipcRenderer.invoke('editor:consume-startup-file') as Promise<string | null>,
+  // 推模式（仅用于"窗口已开时收到新文件"场景）：
+  // 返回 off 函数，便于 onUnmounted 解绑，避免 HMR 累积监听器。
   onOpenFileAtStartup: (callback: (filePath: string) => void) => {
-    ipcRenderer.on('open-file-at-startup', (_event, filePath) => callback(filePath))
+    const handler = (_event: Electron.IpcRendererEvent, filePath: string) => callback(filePath)
+    ipcRenderer.on('open-file-at-startup', handler)
+    return () => {
+      ipcRenderer.removeListener('open-file-at-startup', handler)
+    }
   },
   setTitlebarTheme: (theme: 'light' | 'dark') => ipcRenderer.send('window-titlebar-theme', theme),
   setNativeTheme: (source: 'light' | 'dark' | 'system') =>
